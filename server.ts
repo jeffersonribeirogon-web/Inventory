@@ -13,20 +13,27 @@ app.post('/api/process-caixa', async (req, res) => {
     const { imageBase64 } = req.body;
     
     const response = await ai.generate({
-      model: 'googleai/gemini-2.5-flash',
+      model: 'googleai/gemini-3.6-flash',
       messages: [
         {
           role: 'user',
           content: [
             { media: { url: imageBase64 } },
-            { text: 'Extract all barcodes from this image of a box/label. Return only a JSON array of strings containing the barcode values. Do not wrap in markdown blocks, just the JSON array. Make sure you extract numbers or alphanumerics that look like part of a barcode.' }
+            { text: 'Extract information from this inventory label. Return a JSON object with the following fields: "composto" (the compound name, e.g., "RET"), "lote" (the number from the first/top-most barcode, e.g., "00260830004"), "unidade" (the text physically located right below the word "Reuso". If empty, return the exact string "vazio"), "dataExpiracao" (Data de expiração, e.g., "29/10/2026").' }
           ]
         }
       ],
-      output: { schema: z.array(z.string()) }
+      output: { 
+        schema: z.object({
+          composto: z.string().optional().describe("Composto, ex: RET"),
+          lote: z.string().optional().describe("Lote do primeiro barcode, ex: 00260830004"),
+          unidade: z.string().optional().describe("Informação abaixo da escrita Reuso (se vazio, retorne 'vazio')"),
+          dataExpiracao: z.string().optional().describe("Data de expiração, ex: 29/10/2026")
+        })
+      }
     });
     
-    res.json({ barcodes: response.output });
+    res.json({ data: response.output });
   } catch (error) {
     console.error('Error processing caixa:', error);
     res.status(500).json({ error: 'Failed to process image' });
@@ -38,7 +45,7 @@ app.post('/api/process-manta', async (req, res) => {
     const { imageBase64 } = req.body;
     
     const response = await ai.generate({
-      model: 'googleai/gemini-2.5-flash',
+      model: 'googleai/gemini-3.6-flash',
       messages: [
         {
           role: 'user',

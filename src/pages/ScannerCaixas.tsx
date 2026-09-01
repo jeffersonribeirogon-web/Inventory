@@ -10,8 +10,11 @@ import Papa from 'papaparse';
 
 interface ScanItem {
   id: string;
-  barcode: string;
-  scannedAt: any;
+  composto?: string;
+  lote?: string;
+  unidade?: string;
+  dataExpiracao?: string;
+  scannedAt?: any;
 }
 
 export function ScannerCaixas() {
@@ -70,18 +73,28 @@ export function ScannerCaixas() {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     
-    // Set canvas dimensions to match video
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    // Scale down image to avoid Vercel 4.5MB payload limit
+    const MAX_DIMENSION = 1280;
+    let width = video.videoWidth;
+    let height = video.videoHeight;
+    
+    if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
+      const ratio = Math.min(MAX_DIMENSION / width, MAX_DIMENSION / height);
+      width = Math.round(width * ratio);
+      height = Math.round(height * ratio);
+    }
+    
+    canvas.width = width;
+    canvas.height = height;
     
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     
     // Draw current video frame to canvas
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    ctx.drawImage(video, 0, 0, width, height);
     
-    // Get Base64 image
-    const imageBase64 = canvas.toDataURL('image/jpeg', 0.8);
+    // Get compressed Base64 image
+    const imageBase64 = canvas.toDataURL('image/jpeg', 0.7);
     
     setIsProcessing(true);
     
@@ -98,16 +111,14 @@ export function ScannerCaixas() {
       
       const data = await res.json();
       
-      if (data.barcodes && Array.isArray(data.barcodes)) {
+      if (data.data) {
         // Save to Firestore
-        for (const barcode of data.barcodes) {
-          await addDoc(collection(db, 'inventory_scans'), {
-            barcode,
-            scannedAt: serverTimestamp()
-          });
-        }
+        await addDoc(collection(db, 'inventory_scans'), {
+          ...data.data,
+          scannedAt: serverTimestamp()
+        });
       } else {
-        alert("Nenhum código de barras identificado.");
+        alert("Não foi possível identificar as informações na etiqueta.");
       }
     } catch (err: any) {
       if (err.message === 'OFFLINE' || err.message.includes('fetch')) {
@@ -141,15 +152,18 @@ export function ScannerCaixas() {
 
   const exportCSV = () => {
     const csvData = scans.map(s => ({
-      'Código de Barras': s.barcode,
-      'Data/Hora': s.scannedAt?.toDate() ? s.scannedAt.toDate().toLocaleString('pt-BR') : 'N/A'
+      'Lote (Barcode)': s.lote || '',
+      'Composto': s.composto || '',
+      'Unidade': s.unidade || '',
+      'Data Expiração': s.dataExpiracao || '',
+      'Data/Hora (App)': s.scannedAt?.toDate() ? s.scannedAt.toDate().toLocaleString('pt-BR') : 'N/A'
     }));
     const csv = Papa.unparse(csvData);
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.setAttribute('download', `inventario_caixas_${new Date().toISOString()}.csv`);
+    link.setAttribute('download', `inventario_reuso_${new Date().toISOString()}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -157,11 +171,14 @@ export function ScannerCaixas() {
 
   const sendEmail = () => {
     const csvData = scans.map(s => ({
-      'Código de Barras': s.barcode,
-      'Data/Hora': s.scannedAt?.toDate() ? s.scannedAt.toDate().toLocaleString('pt-BR') : 'N/A'
+      'Lote (Barcode)': s.lote || '',
+      'Composto': s.composto || '',
+      'Unidade': s.unidade || '',
+      'Data Expiração': s.dataExpiracao || '',
+      'Data/Hora (App)': s.scannedAt?.toDate() ? s.scannedAt.toDate().toLocaleString('pt-BR') : 'N/A'
     }));
     const csv = Papa.unparse(csvData);
-    const subject = encodeURIComponent("Inventário de Caixas Katame");
+    const subject = encodeURIComponent("Inventário de Etiquetas de Reuso");
     const body = encodeURIComponent("Segue em anexo os dados do inventário (Cole os dados abaixo no Excel):\n\n" + csv);
     window.location.href = `mailto:?subject=${subject}&body=${body}`;
   };
@@ -172,7 +189,7 @@ export function ScannerCaixas() {
         <div className="absolute inset-0 z-50 bg-black/60 flex flex-col items-center justify-center text-white backdrop-blur-sm">
           <Loader2 className="h-12 w-12 animate-spin text-[#009988] mb-4" />
           <p className="font-semibold text-lg">Processando imagem com Gemini...</p>
-          <p className="text-sm text-neutral-300">Extraindo códigos de barras</p>
+          <p className="text-sm text-neutral-300">Extraindo dados da etiqueta</p>
         </div>
       )}
       
@@ -181,7 +198,7 @@ export function ScannerCaixas() {
           <Button variant="ghost" size="icon" onClick={() => navigate('/')}>
             <ArrowLeft className="h-5 w-5" />
           </Button>
-          <h2 className="font-semibold text-lg text-neutral-900">Scanner Caixas</h2>
+          <h2 className="font-semibold text-lg text-neutral-900">Scanner Etiquetas (Reuso)</h2>
         </div>
         <div className="flex gap-2">
           <Button variant="ghost" size="icon" onClick={exportCSV} title="Exportar CSV">
@@ -218,7 +235,7 @@ export function ScannerCaixas() {
 
       <div className="flex-1 bg-white p-4 overflow-y-auto">
         <div className="flex items-center justify-between mb-4">
-          <h3 className="font-medium text-neutral-900">Códigos Lidos ({scans.length})</h3>
+          <h3 className="font-medium text-neutral-900">Etiquetas Lidas ({scans.length})</h3>
           {scans.length > 0 && (
             <Button variant="ghost" size="sm" onClick={clearAll} className="text-red-500 hover:text-red-600 hover:bg-red-50">
               Limpar Tudo
@@ -226,23 +243,30 @@ export function ScannerCaixas() {
           )}
         </div>
         
-        <div className="space-y-2 pb-12">
+        <div className="space-y-3 pb-12">
           {scans.length === 0 ? (
             <div className="text-center text-neutral-400 py-8">
-              Nenhum código escaneado ainda.
+              Nenhuma etiqueta escaneada ainda.
             </div>
           ) : (
             scans.map(scan => (
-              <Card key={scan.id} className="p-3 flex items-center justify-between shadow-sm">
-                <div>
-                  <p className="font-mono font-medium text-neutral-900">{scan.barcode}</p>
-                  <p className="text-xs text-neutral-500">
-                    {scan.scannedAt?.toDate() ? scan.scannedAt.toDate().toLocaleTimeString('pt-BR') : '...'}
-                  </p>
+              <Card key={scan.id} className="p-4 shadow-sm border-neutral-100 relative">
+                <div className="absolute top-2 right-2">
+                  <Button variant="ghost" size="icon" onClick={() => deleteItem(scan.id)} className="h-6 w-6">
+                    <Trash2 className="h-4 w-4 text-neutral-400 hover:text-red-500" />
+                  </Button>
                 </div>
-                <Button variant="ghost" size="icon" onClick={() => deleteItem(scan.id)}>
-                  <Trash2 className="h-4 w-4 text-neutral-400 hover:text-red-500" />
-                </Button>
+                <div className="mb-2">
+                  <span className="inline-block bg-[#2941CC]/10 text-[#2941CC] font-bold px-2 py-1 rounded text-sm mb-1">{scan.composto || 'S/ COMPOSTO'}</span>
+                  <p className="font-mono text-lg font-semibold text-neutral-900">{scan.lote || 'Sem Lote'}</p>
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-sm">
+                  <div><span className="text-neutral-500 block text-xs">Unidade</span> {scan.unidade || '-'}</div>
+                  <div><span className="text-neutral-500 block text-xs">Validade</span> {scan.dataExpiracao || '-'}</div>
+                </div>
+                <p className="text-[10px] text-neutral-400 mt-3 pt-2 border-t border-neutral-100">
+                  Capturado em: {scan.scannedAt?.toDate() ? scan.scannedAt.toDate().toLocaleTimeString('pt-BR') : '...'}
+                </p>
               </Card>
             ))
           )}

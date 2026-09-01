@@ -67,14 +67,25 @@ export function ScannerMantas() {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    // Scale down image to avoid Vercel 4.5MB payload limit
+    const MAX_DIMENSION = 1280;
+    let width = video.videoWidth;
+    let height = video.videoHeight;
+    
+    if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
+      const ratio = Math.min(MAX_DIMENSION / width, MAX_DIMENSION / height);
+      width = Math.round(width * ratio);
+      height = Math.round(height * ratio);
+    }
+    
+    canvas.width = width;
+    canvas.height = height;
     
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const imageBase64 = canvas.toDataURL('image/jpeg', 0.8);
+    ctx.drawImage(video, 0, 0, width, height);
+    const imageBase64 = canvas.toDataURL('image/jpeg', 0.7);
     
     setIsProcessing(true);
     

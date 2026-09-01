@@ -40,13 +40,11 @@ export function Hub() {
             body: JSON.stringify({ imageBase64: item.imageBase64 })
           });
           const data = await res.json();
-          if (data.barcodes && Array.isArray(data.barcodes)) {
-            for (const barcode of data.barcodes) {
-              await addDoc(collection(db, 'inventory_scans'), {
-                barcode,
-                scannedAt: serverTimestamp()
-              });
-            }
+          if (data.data) {
+            await addDoc(collection(db, 'inventory_scans'), {
+              ...data.data,
+              scannedAt: serverTimestamp()
+            });
           }
         } else if (item.type === 'manta') {
           const res = await fetch('/api/process-manta', {
@@ -113,9 +111,9 @@ export function Hub() {
             <div className="h-12 w-12 rounded-lg bg-[#2941CC]/10 flex items-center justify-center mb-4">
               <Box className="h-6 w-6 text-[#2941CC]" />
             </div>
-            <CardTitle>Scanner de Caixas</CardTitle>
+            <CardTitle>Scanner Etiquetas (Reuso)</CardTitle>
             <CardDescription>
-              Captura e extração de códigos de barras de caixas. Salva no banco de dados centralizado em tempo real.
+              Captura e extração de Lote, Composto, Unidade e Validade de etiquetas de reuso. Salva no banco de dados.
             </CardDescription>
           </CardHeader>
           <CardContent>
