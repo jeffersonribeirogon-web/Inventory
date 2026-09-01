@@ -1,0 +1,10 @@
+{
+  "name": "Katame Inventory Scanner",
+  "description": "Sistema industrial para inventário de caixas e mantas de borracha utilizando IA para extração de dados.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

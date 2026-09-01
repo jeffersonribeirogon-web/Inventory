@@ -1,0 +1,11 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Allow anonymous users to read and create scans.
+    // In a real production environment, you might restrict reads to only the creator.
+    match /inventory_scans/{document} {
+      allow read, write: if true;
+    }
+  }
+}
