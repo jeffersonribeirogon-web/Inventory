@@ -281,7 +281,7 @@ export function ScannerCaixas() {
       
       {/* Modals para apagar itens */}
       {itemToDelete && (
-        <div className="absolute inset-0 z-50 bg-black/60 flex items-center justify-center p-4 backdrop-blur-sm">
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 backdrop-blur-sm">
           <Card className="w-full max-w-sm p-6 animate-in fade-in zoom-in duration-200">
             <h3 className="text-xl font-bold text-neutral-900 mb-2">Remover Item?</h3>
             <p className="text-neutral-500 mb-6">Tem certeza que deseja apagar este código?</p>
@@ -294,7 +294,7 @@ export function ScannerCaixas() {
       )}
 
       {showClearConfirm && (
-        <div className="absolute inset-0 z-50 bg-black/60 flex items-center justify-center p-4 backdrop-blur-sm">
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 backdrop-blur-sm">
           <Card className="w-full max-w-sm p-6 animate-in fade-in zoom-in duration-200">
             <h3 className="text-xl font-bold text-neutral-900 mb-2">Apagar tudo?</h3>
             <p className="text-neutral-500 mb-6">Você tem certeza que deseja remover todos os registros do banco de dados? Esta ação não pode ser desfeita.</p>
@@ -307,7 +307,7 @@ export function ScannerCaixas() {
       )}
 
       {activeModal === 'manual' && (
-        <div className="absolute inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-sm">
+        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-sm">
           <Card className="w-full max-w-sm animate-in fade-in zoom-in duration-200">
             <form onSubmit={handleManualSubmit} className="p-6">
               <h3 className="text-xl font-bold text-neutral-900 mb-2">Entrada Manual</h3>
@@ -343,7 +343,7 @@ export function ScannerCaixas() {
       )}
 
       {activeModal === 'katame' && (
-        <div className="absolute inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-sm">
+        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-sm">
           <Card className="w-full max-w-sm animate-in fade-in zoom-in duration-200">
             <div className="p-6">
               <h3 className="text-xl font-bold text-neutral-900 mb-1">Código Lido!</h3>
@@ -380,7 +380,7 @@ export function ScannerCaixas() {
       )}
 
       {activeModal === 'local' && (
-        <div className="absolute inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-sm">
+        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-sm">
           <Card className="w-full max-w-sm animate-in fade-in zoom-in duration-200">
             <form onSubmit={saveScan} className="p-6">
               <h3 className="text-xl font-bold text-neutral-900 mb-6">Última Etapa</h3>
