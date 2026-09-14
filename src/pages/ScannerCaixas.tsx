@@ -29,10 +29,11 @@ export function ScannerCaixas() {
   const [cameraError, setCameraError] = useState(false);
   
   // Modal states
-  const [activeModal, setActiveModal] = useState<'none' | 'katame' | 'local'>('none');
+  const [activeModal, setActiveModal] = useState<'none' | 'katame' | 'local' | 'manual'>('none');
   const [currentBarcode, setCurrentBarcode] = useState('');
   const [katameInput, setKatameInput] = useState('REBK');
   const [localInput, setLocalInput] = useState('UNIT1');
+  const [manualBarcode, setManualBarcode] = useState('');
 
   const [duplicateError, setDuplicateError] = useState(false);
 
@@ -79,12 +80,10 @@ export function ScannerCaixas() {
             const cleanText = decodedText.trim();
             if (cleanText.length < 12) return; // Enforce minimum 12 characters
 
-            // Auto-capture if barcode starts with '5', otherwise require manual trigger
+            // Auto-capture if barcode starts with '5'
             const isAutoMatch = cleanText.startsWith('5');
-            const isManualRequest = captureRequestedRef.current;
 
-            if (isAutoMatch || isManualRequest) {
-              captureRequestedRef.current = false; // Reset manual trigger if used
+            if (isAutoMatch) {
               setIsReading(false);
               
               setCurrentBarcode(cleanText);
@@ -114,12 +113,24 @@ export function ScannerCaixas() {
     };
   }, []);
 
-  const handleManualScan = () => {
-    if (!scannerRef.current || scannerRef.current.getState() !== 2) return;
+  const openManualModal = () => {
+    setManualBarcode('');
+    setActiveModal('manual');
+  };
+
+  const handleManualSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    let finalBarcode = manualBarcode.trim();
     
-    // Toggle manual read mode
-    captureRequestedRef.current = !captureRequestedRef.current;
-    setIsReading(captureRequestedRef.current);
+    if (finalBarcode.length === 11 && !finalBarcode.startsWith('5')) {
+      finalBarcode = '5' + finalBarcode;
+    } else if (finalBarcode.length < 11) {
+      alert("O lote digitado é muito curto. Digite os 11 números após o 5, ou o código completo.");
+      return;
+    }
+    
+    setCurrentBarcode(finalBarcode);
+    setActiveModal('katame');
   };
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -282,6 +293,42 @@ export function ScannerCaixas() {
         </div>
       )}
 
+      {activeModal === 'manual' && (
+        <div className="absolute inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-sm">
+          <Card className="w-full max-w-sm animate-in fade-in zoom-in duration-200">
+            <form onSubmit={handleManualSubmit} className="p-6">
+              <h3 className="text-xl font-bold text-neutral-900 mb-2">Entrada Manual</h3>
+              <p className="text-sm text-neutral-500 mb-6">Digite os 11 números após o "5", ou o lote completo com 12 dígitos.</p>
+              
+              <div className="space-y-4 mb-6">
+                <div>
+                  <label className="block text-sm font-medium text-neutral-700 mb-1">
+                    Código do Lote
+                  </label>
+                  <input
+                    type="number"
+                    value={manualBarcode}
+                    onChange={(e) => setManualBarcode(e.target.value)}
+                    className="w-full border-neutral-300 rounded-md shadow-sm border p-3 text-lg focus:ring-[#009988] focus:border-[#009988] bg-white font-mono"
+                    placeholder="Ex: 51234567890"
+                    autoFocus
+                  />
+                </div>
+              </div>
+              
+              <div className="flex gap-3 justify-end">
+                <Button type="button" variant="outline" onClick={() => setActiveModal('none')} className="flex-1">
+                  Cancelar
+                </Button>
+                <Button type="submit" className="flex-1 bg-[#009988] hover:bg-[#008877] text-white">
+                  Avançar
+                </Button>
+              </div>
+            </form>
+          </Card>
+        </div>
+      )}
+
       {activeModal === 'katame' && (
         <div className="absolute inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-sm">
           <Card className="w-full max-w-sm animate-in fade-in zoom-in duration-200">
@@ -403,7 +450,7 @@ export function ScannerCaixas() {
         <div className="absolute inset-x-0 top-6 flex justify-center pointer-events-none z-10">
           <div className="bg-black/50 text-white px-4 py-2 rounded-full backdrop-blur-md text-sm font-medium flex items-center shadow-lg border border-white/10">
             <ScanLine className="h-4 w-4 mr-2" />
-            {isReading ? 'Modo Manual (Aguardando)' : 'Auto-Scan (Lotes iniciando em 5)'}
+            Auto-Scan (Lotes iniciando em 5)
           </div>
         </div>
 
@@ -411,14 +458,13 @@ export function ScannerCaixas() {
         {!cameraError && (
           <div className="absolute bottom-6 left-0 right-0 flex justify-center gap-4 z-10">
             <button 
-              onClick={handleManualScan}
-              className={`px-6 h-14 rounded-full flex items-center justify-center transition-transform shadow-xl font-semibold text-sm ${!isReading ? 'bg-white/20 border-2 border-white text-white active:scale-95' : 'bg-red-500 border-2 border-red-500 text-white animate-pulse'}`}
+              onClick={openManualModal}
+              className="px-6 h-14 rounded-full flex items-center justify-center transition-transform shadow-xl font-semibold text-sm bg-white/20 border-2 border-white text-white active:scale-95"
             >
-              {isReading ? 'Cancelar Manual' : 'Forçar Leitura Manual'}
+              Digitar Lote Manualmente
             </button>
             <button 
               onClick={() => fileInputRef.current?.click()}
-              disabled={isReading}
               className="h-14 w-14 rounded-full bg-white/10 border-2 border-white/50 flex items-center justify-center active:scale-95 transition-transform"
               title="Enviar foto da galeria"
             >
