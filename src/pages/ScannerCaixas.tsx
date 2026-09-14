@@ -34,9 +34,14 @@ export function ScannerCaixas() {
   const [katameInput, setKatameInput] = useState('REBK');
   const [localInput, setLocalInput] = useState('UNIT1');
 
+  const [duplicateError, setDuplicateError] = useState(false);
+
   // Sync modal state to ref for the scanner callback
   useEffect(() => {
     isModalOpenRef.current = activeModal !== 'none';
+    if (activeModal === 'none') {
+      setDuplicateError(false);
+    }
   }, [activeModal]);
 
   const katames = ["REBK", "RETBK978", "RET", "RESW", "REL", "REP", "RETBSW", "RETB2", "RETB3", "RETB4", "RETBA", "RETK", "REK367"];
@@ -144,15 +149,17 @@ export function ScannerCaixas() {
 
   const saveScan = async (e: React.FormEvent) => {
     e.preventDefault();
+    setDuplicateError(false);
     
     // Duplicate check
     const isDuplicate = scans.some(scan => 
-      scan.lote === currentBarcode && 
-      scan.composto === katameInput && 
-      scan.unidade === localInput
+      String(scan.lote || '').trim() === currentBarcode.trim() && 
+      String(scan.composto || '').trim() === katameInput.trim() && 
+      String(scan.unidade || '').trim() === localInput.trim()
     );
     
     if (isDuplicate) {
+      setDuplicateError(true);
       alert("⚠️ DUPLICIDADE DETECTADA: Este Lote já foi registrado com este Katame e Local!");
       return;
     }
@@ -319,6 +326,11 @@ export function ScannerCaixas() {
               <h3 className="text-xl font-bold text-neutral-900 mb-6">Última Etapa</h3>
               
               <div className="space-y-4 mb-6">
+                {duplicateError && (
+                  <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded text-sm font-semibold mb-4 animate-in fade-in slide-in-from-top-2">
+                    ⚠️ DUPLICIDADE DETECTADA:<br/><span className="font-normal text-xs">Este Lote já foi registrado com este Katame e Local. Mude os dados ou ignore.</span>
+                  </div>
+                )}
                 <div>
                   <label className="block text-sm font-medium text-neutral-700 mb-1">
                     2. Selecione o Local
