@@ -21,7 +21,7 @@ export function ScannerCaixas() {
   const navigate = useNavigate();
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const captureRequestedRef = useRef(false);
-  const captureTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const isModalOpenRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   
   const [scans, setScans] = useState<ScanItem[]>([]);
@@ -33,6 +33,11 @@ export function ScannerCaixas() {
   const [currentBarcode, setCurrentBarcode] = useState('');
   const [katameInput, setKatameInput] = useState('REBK');
   const [localInput, setLocalInput] = useState('UNIT1');
+
+  // Sync modal state to ref for the scanner callback
+  useEffect(() => {
+    isModalOpenRef.current = activeModal !== 'none';
+  }, [activeModal]);
 
   const katames = ["REBK", "RETBK978", "RET", "RESW", "REL", "REP", "RETBSW", "RETB2", "RETB3", "RETB4", "RETBA", "RETK", "REK367"];
   const locais = ["UNIT1", "UNIT2", "UNIT3", "UNIT4", "UNIT5", "UNIT6", "TBR1", "TBR2", "MIX"];
@@ -61,22 +66,28 @@ export function ScannerCaixas() {
           { facingMode: "environment" },
           { 
             fps: 15, 
-            qrbox: { width: 280, height: 120 } 
+            qrbox: { width: 320, height: 160 } 
           },
           (decodedText) => {
-            // Only process if the user requested a capture
-            if (captureRequestedRef.current && scanner.getState() === 2) { // 2 = SCANNING
-              captureRequestedRef.current = false;
+            if (isModalOpenRef.current) return; // Ignore scans while popup is open
+
+            const cleanText = decodedText.trim();
+            if (cleanText.length < 12) return; // Enforce minimum 12 characters
+
+            // Auto-capture if barcode starts with '5', otherwise require manual trigger
+            const isAutoMatch = cleanText.startsWith('5');
+            const isManualRequest = captureRequestedRef.current;
+
+            if (isAutoMatch || isManualRequest) {
+              captureRequestedRef.current = false; // Reset manual trigger if used
               setIsReading(false);
-              if (captureTimeoutRef.current) clearTimeout(captureTimeoutRef.current);
               
-              scanner.pause(true); // pause and stop video stream temporarily
-              setCurrentBarcode(decodedText);
+              setCurrentBarcode(cleanText);
               setActiveModal('katame');
             }
           },
           (error) => {
-            // Ignore normal scanning errors (happens every frame it doesn't find a code)
+            // Ignore normal scanning errors
           }
         );
       } catch (err) {
@@ -88,12 +99,8 @@ export function ScannerCaixas() {
     startScanner();
 
     return () => {
-      if (captureTimeoutRef.current) clearTimeout(captureTimeoutRef.current);
       try {
         if (scanner.getState() === 2) {
-          scanner.stop().then(() => scanner.clear()).catch(console.error);
-        } else if (scanner.getState() === 3) { // 3 = PAUSED
-          scanner.resume();
           scanner.stop().then(() => scanner.clear()).catch(console.error);
         }
       } catch (e) {
@@ -105,18 +112,9 @@ export function ScannerCaixas() {
   const handleManualScan = () => {
     if (!scannerRef.current || scannerRef.current.getState() !== 2) return;
     
-    captureRequestedRef.current = true;
-    setIsReading(true);
-    
-    // Set a 2.5 second timeout to grab a frame
-    if (captureTimeoutRef.current) clearTimeout(captureTimeoutRef.current);
-    captureTimeoutRef.current = setTimeout(() => {
-      if (captureRequestedRef.current) {
-        captureRequestedRef.current = false;
-        setIsReading(false);
-        alert("Nenhum código de barras focado. Aponte para a etiqueta e tente novamente.");
-      }
-    }, 2500);
+    // Toggle manual read mode
+    captureRequestedRef.current = !captureRequestedRef.current;
+    setIsReading(captureRequestedRef.current);
   };
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -126,7 +124,14 @@ export function ScannerCaixas() {
     try {
       setIsReading(true);
       const decodedText = await scannerRef.current.scanFile(file, true);
-      setCurrentBarcode(decodedText);
+      const cleanText = decodedText.trim();
+      
+      if (cleanText.length < 12) {
+        alert("O código de barras da imagem é muito curto (mínimo de 12 caracteres).");
+        return;
+      }
+      
+      setCurrentBarcode(cleanText);
       setActiveModal('katame');
     } catch (err) {
       console.error(err);
@@ -139,6 +144,19 @@ export function ScannerCaixas() {
 
   const saveScan = async (e: React.FormEvent) => {
     e.preventDefault();
+    
+    // Duplicate check
+    const isDuplicate = scans.some(scan => 
+      scan.lote === currentBarcode && 
+      scan.composto === katameInput && 
+      scan.unidade === localInput
+    );
+    
+    if (isDuplicate) {
+      alert("⚠️ DUPLICIDADE DETECTADA: Este Lote já foi registrado com este Katame e Local!");
+      return;
+    }
+
     try {
       await addDoc(collection(db, 'inventory_scans'), {
         lote: currentBarcode,
@@ -163,13 +181,6 @@ export function ScannerCaixas() {
     setKatameInput('REBK');
     setLocalInput('UNIT1');
     setCurrentBarcode('');
-    try {
-      if (scannerRef.current?.getState() === 3) {
-        scannerRef.current.resume();
-      }
-    } catch (e) {
-      console.error("Error resuming scanner:", e);
-    }
   };
 
   // Confirmation Modals
@@ -380,7 +391,7 @@ export function ScannerCaixas() {
         <div className="absolute inset-x-0 top-6 flex justify-center pointer-events-none z-10">
           <div className="bg-black/50 text-white px-4 py-2 rounded-full backdrop-blur-md text-sm font-medium flex items-center shadow-lg border border-white/10">
             <ScanLine className="h-4 w-4 mr-2" />
-            {isReading ? 'Lendo...' : 'Aponte para o Código de Barras'}
+            {isReading ? 'Modo Manual (Aguardando)' : 'Auto-Scan (Lotes iniciando em 5)'}
           </div>
         </div>
 
@@ -389,18 +400,17 @@ export function ScannerCaixas() {
           <div className="absolute bottom-6 left-0 right-0 flex justify-center gap-4 z-10">
             <button 
               onClick={handleManualScan}
-              disabled={isReading}
-              className={`h-16 w-16 rounded-full flex items-center justify-center transition-transform shadow-xl ${!isReading ? 'bg-white/20 border-4 border-white active:scale-95' : 'bg-[#009988] border-4 border-[#009988] animate-pulse'}`}
+              className={`px-6 h-14 rounded-full flex items-center justify-center transition-transform shadow-xl font-semibold text-sm ${!isReading ? 'bg-white/20 border-2 border-white text-white active:scale-95' : 'bg-red-500 border-2 border-red-500 text-white animate-pulse'}`}
             >
-              {isReading ? <Loader2 className="h-6 w-6 text-white animate-spin" /> : <Camera className="h-6 w-6 text-white" />}
+              {isReading ? 'Cancelar Manual' : 'Forçar Leitura Manual'}
             </button>
             <button 
               onClick={() => fileInputRef.current?.click()}
               disabled={isReading}
-              className="h-16 w-16 rounded-full bg-white/10 border-2 border-white/50 flex items-center justify-center active:scale-95 transition-transform"
+              className="h-14 w-14 rounded-full bg-white/10 border-2 border-white/50 flex items-center justify-center active:scale-95 transition-transform"
               title="Enviar foto da galeria"
             >
-              <Upload className="h-6 w-6 text-white" />
+              <Upload className="h-5 w-5 text-white" />
             </button>
           </div>
         )}
