@@ -37,6 +37,29 @@ export function ScannerCaixas() {
 
   const [duplicateError, setDuplicateError] = useState(false);
 
+  const playBeep = () => {
+    try {
+      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const oscillator = audioCtx.createOscillator();
+      const gainNode = audioCtx.createGain();
+      
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(800, audioCtx.currentTime); // 800Hz beep
+      
+      gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
+      gainNode.gain.linearRampToValueAtTime(1, audioCtx.currentTime + 0.01);
+      gainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.15); // Short 150ms beep
+      
+      oscillator.connect(gainNode);
+      gainNode.connect(audioCtx.destination);
+      
+      oscillator.start();
+      oscillator.stop(audioCtx.currentTime + 0.2);
+    } catch (e) {
+      console.log("Audio play blocked or not supported", e);
+    }
+  };
+
   // Sync modal state to ref for the scanner callback
   useEffect(() => {
     isModalOpenRef.current = activeModal !== 'none';
@@ -97,6 +120,7 @@ export function ScannerCaixas() {
             const isAutoMatch = cleanText.startsWith('5');
 
             if (isAutoMatch) {
+              playBeep();
               setIsReading(false);
               
               setCurrentBarcode(cleanText);
@@ -160,6 +184,7 @@ export function ScannerCaixas() {
         return;
       }
       
+      playBeep();
       setCurrentBarcode(cleanText);
       setActiveModal('katame');
     } catch (err) {
@@ -209,8 +234,9 @@ export function ScannerCaixas() {
 
   const closeModalAndResume = () => {
     setActiveModal('none');
-    setKatameInput('REBK');
-    setLocalInput('UNIT1');
+    // REMOVIDO: Não resetar katameInput e localInput para manter a última escolha na memória
+    // setKatameInput('REBK');
+    // setLocalInput('UNIT1');
     setCurrentBarcode('');
   };
 
