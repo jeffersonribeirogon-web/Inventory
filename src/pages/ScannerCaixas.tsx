@@ -48,13 +48,26 @@ export function ScannerCaixas() {
   const katames = ["REBK", "RETBK978", "RET", "RESW", "REL", "REP", "RETBSW", "RETB2", "RETB3", "RETB4", "RETBA", "RETK", "REK367"];
   const locais = ["UNIT1", "UNIT2", "UNIT3", "UNIT4", "UNIT5", "UNIT6", "TBR1", "TBR2", "MIX"];
 
+  const [isOffline, setIsOffline] = useState(!navigator.onLine);
+
+  useEffect(() => {
+    const handleOnline = () => setIsOffline(false);
+    const handleOffline = () => setIsOffline(true);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
   // Setup Firestore Real-time listener
   useEffect(() => {
     const q = query(collection(db, 'inventory_scans'), orderBy('scannedAt', 'desc'));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const items: ScanItem[] = [];
       snapshot.forEach((doc) => {
-        items.push({ id: doc.id, ...doc.data() } as ScanItem);
+        items.push({ id: doc.id, ...doc.data({ serverTimestamps: 'estimate' }) } as ScanItem);
       });
       setScans(items);
     });
@@ -423,6 +436,13 @@ export function ScannerCaixas() {
           </Button>
         </div>
       </header>
+
+      {isOffline && (
+        <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 flex items-center justify-center text-amber-800 text-xs font-medium z-10 relative shadow-sm">
+          <span className="w-2 h-2 rounded-full bg-amber-500 mr-2 animate-pulse"></span>
+          Modo Offline Ativo. Leituras serão sincronizadas quando houver internet.
+        </div>
+      )}
 
       <div className="relative bg-black aspect-[3/4] w-full overflow-hidden flex items-center justify-center">
         {cameraError && (
