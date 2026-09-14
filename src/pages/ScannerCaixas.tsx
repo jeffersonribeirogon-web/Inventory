@@ -114,7 +114,9 @@ export function ScannerCaixas() {
             if (isModalOpenRef.current) return; // Ignore scans while popup is open
 
             const cleanText = decodedText.trim();
-            if (cleanText.length < 12) return; // Enforce minimum 12 characters
+            
+            // Only accept exactly 12 numeric digits
+            if (!/^\d{12}$/.test(cleanText)) return;
 
             // Auto-capture if barcode starts with '5'
             const isAutoMatch = cleanText.startsWith('5');
@@ -159,10 +161,19 @@ export function ScannerCaixas() {
     e.preventDefault();
     let finalBarcode = manualBarcode.trim();
     
+    // Check if it has any non-numeric characters
+    if (!/^\d+$/.test(finalBarcode)) {
+      alert("O lote deve conter apenas números. Verifique se há letras ou caracteres especiais digitados.");
+      return;
+    }
+
     if (finalBarcode.length === 11 && !finalBarcode.startsWith('5')) {
       finalBarcode = '5' + finalBarcode;
-    } else if (finalBarcode.length < 11) {
-      alert("O lote digitado é muito curto. Digite os 11 números após o 5, ou o código completo.");
+    } else if (finalBarcode.length !== 12) {
+      alert("O lote digitado é inválido. Digite os 11 números após o 5, ou os 12 números do código completo.");
+      return;
+    } else if (!finalBarcode.startsWith('5')) {
+      alert("O lote completo de 12 dígitos deve começar com o número 5.");
       return;
     }
     
@@ -179,8 +190,13 @@ export function ScannerCaixas() {
       const decodedText = await scannerRef.current.scanFile(file, true);
       const cleanText = decodedText.trim();
       
-      if (cleanText.length < 12) {
-        alert("O código de barras da imagem é muito curto (mínimo de 12 caracteres).");
+      if (!/^\d{12}$/.test(cleanText)) {
+        alert("O código de barras da imagem é inválido. Deve conter exatamente 12 números.");
+        return;
+      }
+      
+      if (!cleanText.startsWith('5')) {
+        alert("O código de barras da imagem não começa com o número 5.");
         return;
       }
       
@@ -234,9 +250,9 @@ export function ScannerCaixas() {
 
   const closeModalAndResume = () => {
     setActiveModal('none');
-    // REMOVIDO: Não resetar katameInput e localInput para manter a última escolha na memória
-    // setKatameInput('REBK');
-    // setLocalInput('UNIT1');
+    // Keep Katame in memory (do not reset katameInput)
+    // Always reset local to UNIT1:
+    setLocalInput('UNIT1');
     setCurrentBarcode('');
   };
 
