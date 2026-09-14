@@ -1,12 +1,12 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Camera, ArrowLeft, Trash2, Download, Mail, Loader2 } from 'lucide-react';
+import { ArrowLeft, Trash2, Download, Mail, ScanLine, Camera, Loader2, Upload } from 'lucide-react';
 import { collection, addDoc, query, orderBy, onSnapshot, deleteDoc, doc, serverTimestamp, getDocs } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { Button } from '../components/ui/button';
-import { Card, CardContent } from '../components/ui/card';
-import { addToQueue } from '../lib/queue';
+import { Card } from '../components/ui/card';
 import Papa from 'papaparse';
+import { Html5Qrcode } from 'html5-qrcode';
 
 interface ScanItem {
   id: string;
@@ -19,11 +19,23 @@ interface ScanItem {
 
 export function ScannerCaixas() {
   const navigate = useNavigate();
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [isCameraActive, setIsCameraActive] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
+  const scannerRef = useRef<Html5Qrcode | null>(null);
+  const captureRequestedRef = useRef(false);
+  const captureTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  
   const [scans, setScans] = useState<ScanItem[]>([]);
+  const [isReading, setIsReading] = useState(false);
+  const [cameraError, setCameraError] = useState(false);
+  
+  // Modal states
+  const [activeModal, setActiveModal] = useState<'none' | 'katame' | 'local'>('none');
+  const [currentBarcode, setCurrentBarcode] = useState('');
+  const [katameInput, setKatameInput] = useState('REBK');
+  const [localInput, setLocalInput] = useState('UNIT1');
+
+  const katames = ["REBK", "RETBK978", "RET", "RESW", "REL", "REP", "RETBSW", "RETB2", "RETB3", "RETB4", "RETBA", "RETK", "REK367"];
+  const locais = ["UNIT1", "UNIT2", "UNIT3", "UNIT4", "UNIT5", "UNIT6", "TBR1", "TBR2", "MIX"];
 
   // Setup Firestore Real-time listener
   useEffect(() => {
@@ -38,116 +50,155 @@ export function ScannerCaixas() {
     return () => unsubscribe();
   }, []);
 
-  const startCamera = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment' }
-      });
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        setIsCameraActive(true);
-      }
-    } catch (err) {
-      console.error("Error accessing camera:", err);
-      alert("Não foi possível acessar a câmera. Verifique as permissões.");
-    }
-  };
-
-  const stopCamera = () => {
-    if (videoRef.current && videoRef.current.srcObject) {
-      const stream = videoRef.current.srcObject as MediaStream;
-      stream.getTracks().forEach(track => track.stop());
-      videoRef.current.srcObject = null;
-      setIsCameraActive(false);
-    }
-  };
-
+  // Initialize Barcode Scanner
   useEffect(() => {
-    startCamera();
-    return () => stopCamera();
+    const scanner = new Html5Qrcode("reader");
+    scannerRef.current = scanner;
+
+    const startScanner = async () => {
+      try {
+        await scanner.start(
+          { facingMode: "environment" },
+          { 
+            fps: 15, 
+            qrbox: { width: 280, height: 120 } 
+          },
+          (decodedText) => {
+            // Only process if the user requested a capture
+            if (captureRequestedRef.current && scanner.getState() === 2) { // 2 = SCANNING
+              captureRequestedRef.current = false;
+              setIsReading(false);
+              if (captureTimeoutRef.current) clearTimeout(captureTimeoutRef.current);
+              
+              scanner.pause(true); // pause and stop video stream temporarily
+              setCurrentBarcode(decodedText);
+              setActiveModal('katame');
+            }
+          },
+          (error) => {
+            // Ignore normal scanning errors (happens every frame it doesn't find a code)
+          }
+        );
+      } catch (err) {
+        console.error("Camera access error:", err);
+        setCameraError(true);
+      }
+    };
+
+    startScanner();
+
+    return () => {
+      if (captureTimeoutRef.current) clearTimeout(captureTimeoutRef.current);
+      try {
+        if (scanner.getState() === 2) {
+          scanner.stop().then(() => scanner.clear()).catch(console.error);
+        } else if (scanner.getState() === 3) { // 3 = PAUSED
+          scanner.resume();
+          scanner.stop().then(() => scanner.clear()).catch(console.error);
+        }
+      } catch (e) {
+        console.error("Error during cleanup:", e);
+      }
+    };
   }, []);
 
-  const captureAndProcess = async () => {
-    if (!videoRef.current || !canvasRef.current) return;
+  const handleManualScan = () => {
+    if (!scannerRef.current || scannerRef.current.getState() !== 2) return;
+    
+    captureRequestedRef.current = true;
+    setIsReading(true);
+    
+    // Set a 2.5 second timeout to grab a frame
+    if (captureTimeoutRef.current) clearTimeout(captureTimeoutRef.current);
+    captureTimeoutRef.current = setTimeout(() => {
+      if (captureRequestedRef.current) {
+        captureRequestedRef.current = false;
+        setIsReading(false);
+        alert("Nenhum código de barras focado. Aponte para a etiqueta e tente novamente.");
+      }
+    }, 2500);
+  };
 
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    
-    // Scale down image to avoid Vercel 4.5MB payload limit
-    const MAX_DIMENSION = 1280;
-    let width = video.videoWidth;
-    let height = video.videoHeight;
-    
-    if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
-      const ratio = Math.min(MAX_DIMENSION / width, MAX_DIMENSION / height);
-      width = Math.round(width * ratio);
-      height = Math.round(height * ratio);
-    }
-    
-    canvas.width = width;
-    canvas.height = height;
-    
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    
-    // Draw current video frame to canvas
-    ctx.drawImage(video, 0, 0, width, height);
-    
-    // Get compressed Base64 image
-    const imageBase64 = canvas.toDataURL('image/jpeg', 0.7);
-    
-    setIsProcessing(true);
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file || !scannerRef.current) return;
     
     try {
-      if (!navigator.onLine) {
-        throw new Error('OFFLINE');
-      }
+      setIsReading(true);
+      const decodedText = await scannerRef.current.scanFile(file, true);
+      setCurrentBarcode(decodedText);
+      setActiveModal('katame');
+    } catch (err) {
+      console.error(err);
+      alert("Nenhum código de barras encontrado na imagem.");
+    } finally {
+      setIsReading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
 
-      const res = await fetch('/api/process-caixa', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageBase64 })
+  const saveScan = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await addDoc(collection(db, 'inventory_scans'), {
+        lote: currentBarcode,
+        composto: katameInput,
+        unidade: localInput,
+        scannedAt: serverTimestamp()
       });
       
-      const data = await res.json();
-      
-      if (data.data) {
-        // Save to Firestore
-        await addDoc(collection(db, 'inventory_scans'), {
-          ...data.data,
-          scannedAt: serverTimestamp()
-        });
-      } else {
-        alert("Não foi possível identificar as informações na etiqueta.");
-      }
-    } catch (err: any) {
-      if (err.message === 'OFFLINE' || err.message.includes('fetch')) {
-        await addToQueue('caixa', imageBase64);
-        alert('Sem conexão! A imagem foi salva localmente e será processada quando a internet retornar.');
-      } else {
-        console.error(err);
-        alert("Erro ao processar imagem.");
-      }
-    } finally {
-      setIsProcessing(false);
+      closeModalAndResume();
+    } catch (err) {
+      console.error(err);
+      alert("Erro ao salvar dados.");
     }
   };
 
-  const deleteItem = async (id: string) => {
-    if (confirm('Remover este item?')) {
-      await deleteDoc(doc(db, 'inventory_scans', id));
+  const cancelScan = () => {
+    closeModalAndResume();
+  };
+
+  const closeModalAndResume = () => {
+    setActiveModal('none');
+    setKatameInput('REBK');
+    setLocalInput('UNIT1');
+    setCurrentBarcode('');
+    try {
+      if (scannerRef.current?.getState() === 3) {
+        scannerRef.current.resume();
+      }
+    } catch (e) {
+      console.error("Error resuming scanner:", e);
     }
   };
 
-  const clearAll = async () => {
-    if (confirm('Tem certeza que deseja apagar todos os registros do banco?')) {
-      const q = query(collection(db, 'inventory_scans'));
-      const querySnapshot = await getDocs(q);
-      const deletePromises = querySnapshot.docs.map((docSnapshot) => 
-        deleteDoc(doc(db, 'inventory_scans', docSnapshot.id))
-      );
-      await Promise.all(deletePromises);
+  // Confirmation Modals
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [itemToDelete, setItemToDelete] = useState<string | null>(null);
+
+  const deleteItem = (id: string) => {
+    setItemToDelete(id);
+  };
+
+  const confirmDelete = async () => {
+    if (itemToDelete) {
+      await deleteDoc(doc(db, 'inventory_scans', itemToDelete));
+      setItemToDelete(null);
     }
+  };
+
+  const clearAll = () => {
+    setShowClearConfirm(true);
+  };
+
+  const confirmClearAll = async () => {
+    setShowClearConfirm(false);
+    const q = query(collection(db, 'inventory_scans'));
+    const querySnapshot = await getDocs(q);
+    const deletePromises = querySnapshot.docs.map((docSnapshot) => 
+      deleteDoc(doc(db, 'inventory_scans', docSnapshot.id))
+    );
+    await Promise.all(deletePromises);
   };
 
   const exportCSV = () => {
@@ -185,15 +236,108 @@ export function ScannerCaixas() {
 
   return (
     <div className="min-h-screen bg-[#eeeeee] flex flex-col max-w-lg mx-auto shadow-xl relative">
-      {isProcessing && (
-        <div className="absolute inset-0 z-50 bg-black/60 flex flex-col items-center justify-center text-white backdrop-blur-sm">
-          <Loader2 className="h-12 w-12 animate-spin text-[#009988] mb-4" />
-          <p className="font-semibold text-lg">Processando imagem com Gemini...</p>
-          <p className="text-sm text-neutral-300">Extraindo dados da etiqueta</p>
+      
+      {/* Modals para apagar itens */}
+      {itemToDelete && (
+        <div className="absolute inset-0 z-50 bg-black/60 flex items-center justify-center p-4 backdrop-blur-sm">
+          <Card className="w-full max-w-sm p-6 animate-in fade-in zoom-in duration-200">
+            <h3 className="text-xl font-bold text-neutral-900 mb-2">Remover Item?</h3>
+            <p className="text-neutral-500 mb-6">Tem certeza que deseja apagar este código?</p>
+            <div className="flex gap-3 justify-end">
+              <Button variant="outline" onClick={() => setItemToDelete(null)} className="flex-1">Cancelar</Button>
+              <Button onClick={confirmDelete} className="flex-1 bg-red-500 hover:bg-red-600 text-white">Apagar</Button>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {showClearConfirm && (
+        <div className="absolute inset-0 z-50 bg-black/60 flex items-center justify-center p-4 backdrop-blur-sm">
+          <Card className="w-full max-w-sm p-6 animate-in fade-in zoom-in duration-200">
+            <h3 className="text-xl font-bold text-neutral-900 mb-2">Apagar tudo?</h3>
+            <p className="text-neutral-500 mb-6">Você tem certeza que deseja remover todos os registros do banco de dados? Esta ação não pode ser desfeita.</p>
+            <div className="flex gap-3 justify-end">
+              <Button variant="outline" onClick={() => setShowClearConfirm(false)} className="flex-1">Cancelar</Button>
+              <Button onClick={confirmClearAll} className="flex-1 bg-red-500 hover:bg-red-600 text-white">Apagar Tudo</Button>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {activeModal === 'katame' && (
+        <div className="absolute inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-sm">
+          <Card className="w-full max-w-sm animate-in fade-in zoom-in duration-200">
+            <div className="p-6">
+              <h3 className="text-xl font-bold text-neutral-900 mb-1">Código Lido!</h3>
+              <p className="text-sm font-mono text-neutral-500 mb-6 bg-neutral-100 p-2 rounded border">{currentBarcode}</p>
+              
+              <div className="space-y-4 mb-6">
+                <div>
+                  <label className="block text-sm font-medium text-neutral-700 mb-1">
+                    1. Selecione o Katame
+                  </label>
+                  <select
+                    value={katameInput}
+                    onChange={(e) => setKatameInput(e.target.value)}
+                    className="w-full border-neutral-300 rounded-md shadow-sm border p-3 text-lg focus:ring-[#009988] focus:border-[#009988] bg-white"
+                  >
+                    {katames.map((k) => (
+                      <option key={k} value={k}>{k}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              
+              <div className="flex gap-3 justify-end">
+                <Button type="button" variant="outline" onClick={cancelScan} className="flex-1">
+                  Cancelar
+                </Button>
+                <Button type="button" onClick={() => setActiveModal('local')} className="flex-1 bg-[#009988] hover:bg-[#008877] text-white">
+                  Próximo
+                </Button>
+              </div>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {activeModal === 'local' && (
+        <div className="absolute inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-sm">
+          <Card className="w-full max-w-sm animate-in fade-in zoom-in duration-200">
+            <form onSubmit={saveScan} className="p-6">
+              <h3 className="text-xl font-bold text-neutral-900 mb-6">Última Etapa</h3>
+              
+              <div className="space-y-4 mb-6">
+                <div>
+                  <label className="block text-sm font-medium text-neutral-700 mb-1">
+                    2. Selecione o Local
+                  </label>
+                  <select
+                    value={localInput}
+                    onChange={(e) => setLocalInput(e.target.value)}
+                    className="w-full border-neutral-300 rounded-md shadow-sm border p-3 text-lg focus:ring-[#009988] focus:border-[#009988] bg-white"
+                  >
+                    {locais.map((l) => (
+                      <option key={l} value={l}>{l}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              
+              <div className="flex gap-3 justify-end">
+                <Button type="button" variant="outline" onClick={() => setActiveModal('katame')} className="flex-1">
+                  Voltar
+                </Button>
+                <Button type="submit" className="flex-1 bg-[#009988] hover:bg-[#008877] text-white">
+                  Salvar
+                </Button>
+              </div>
+            </form>
+          </Card>
         </div>
       )}
       
-      <header className="bg-white p-4 flex items-center justify-between border-b border-neutral-200">
+      <header className="bg-white p-4 flex items-center justify-between border-b border-neutral-200 z-10 relative">
         <div className="flex items-center gap-3">
           <Button variant="ghost" size="icon" onClick={() => navigate('/')}>
             <ArrowLeft className="h-5 w-5" />
@@ -211,26 +355,55 @@ export function ScannerCaixas() {
       </header>
 
       <div className="relative bg-black aspect-[3/4] w-full overflow-hidden flex items-center justify-center">
-        {!isCameraActive && !isProcessing && (
-          <p className="text-white">Iniciando câmera...</p>
+        {cameraError && (
+          <div className="absolute inset-0 z-10 bg-neutral-900 flex flex-col items-center justify-center p-6 text-center">
+            <p className="text-white mb-4">Câmera indisponível ou permissão negada.</p>
+            <Button variant="outline" className="bg-white/10 text-white border-white/20 hover:bg-white/20" onClick={() => fileInputRef.current?.click()}>
+              <Upload className="h-5 w-5 mr-2" />
+              Enviar Foto da Galeria
+            </Button>
+          </div>
         )}
-        <video 
-          ref={videoRef} 
-          autoPlay 
-          playsInline 
-          className="object-cover w-full h-full"
-        />
-        <canvas ref={canvasRef} className="hidden" />
         
-        <div className="absolute bottom-6 left-0 right-0 flex justify-center">
-          <button 
-            onClick={captureAndProcess}
-            disabled={!isCameraActive || isProcessing}
-            className="h-16 w-16 rounded-full bg-white/20 border-4 border-white flex items-center justify-center active:scale-95 transition-transform"
-          >
-            <Camera className="h-6 w-6 text-white" />
-          </button>
+        <div id="reader" className="w-full h-full [&>video]:object-cover [&>video]:w-full [&>video]:h-full" />
+        
+        <input 
+          type="file" 
+          accept="image/*" 
+          capture="environment"
+          ref={fileInputRef} 
+          onChange={handleFileUpload} 
+          className="hidden" 
+        />
+        
+        {/* Overlay instructions */}
+        <div className="absolute inset-x-0 top-6 flex justify-center pointer-events-none z-10">
+          <div className="bg-black/50 text-white px-4 py-2 rounded-full backdrop-blur-md text-sm font-medium flex items-center shadow-lg border border-white/10">
+            <ScanLine className="h-4 w-4 mr-2" />
+            {isReading ? 'Lendo...' : 'Aponte para o Código de Barras'}
+          </div>
         </div>
+
+        {/* Capture Button */}
+        {!cameraError && (
+          <div className="absolute bottom-6 left-0 right-0 flex justify-center gap-4 z-10">
+            <button 
+              onClick={handleManualScan}
+              disabled={isReading}
+              className={`h-16 w-16 rounded-full flex items-center justify-center transition-transform shadow-xl ${!isReading ? 'bg-white/20 border-4 border-white active:scale-95' : 'bg-[#009988] border-4 border-[#009988] animate-pulse'}`}
+            >
+              {isReading ? <Loader2 className="h-6 w-6 text-white animate-spin" /> : <Camera className="h-6 w-6 text-white" />}
+            </button>
+            <button 
+              onClick={() => fileInputRef.current?.click()}
+              disabled={isReading}
+              className="h-16 w-16 rounded-full bg-white/10 border-2 border-white/50 flex items-center justify-center active:scale-95 transition-transform"
+              title="Enviar foto da galeria"
+            >
+              <Upload className="h-6 w-6 text-white" />
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="flex-1 bg-white p-4 overflow-y-auto">
@@ -257,12 +430,15 @@ export function ScannerCaixas() {
                   </Button>
                 </div>
                 <div className="mb-2">
-                  <span className="inline-block bg-[#2941CC]/10 text-[#2941CC] font-bold px-2 py-1 rounded text-sm mb-1">{scan.composto || 'S/ COMPOSTO'}</span>
+                  <div className="flex gap-2 mb-1">
+                    <span className="inline-block bg-[#2941CC]/10 text-[#2941CC] font-bold px-2 py-1 rounded text-sm">
+                      {scan.composto || 'SEM KATAME'}
+                    </span>
+                    <span className="inline-block bg-emerald-100 text-emerald-800 font-bold px-2 py-1 rounded text-sm">
+                      {scan.unidade || 'SEM LOCAL'}
+                    </span>
+                  </div>
                   <p className="font-mono text-lg font-semibold text-neutral-900">{scan.lote || 'Sem Lote'}</p>
-                </div>
-                <div className="grid grid-cols-2 gap-2 text-sm">
-                  <div><span className="text-neutral-500 block text-xs">Unidade</span> {scan.unidade || '-'}</div>
-                  <div><span className="text-neutral-500 block text-xs">Validade</span> {scan.dataExpiracao || '-'}</div>
                 </div>
                 <p className="text-[10px] text-neutral-400 mt-3 pt-2 border-t border-neutral-100">
                   Capturado em: {scan.scannedAt?.toDate() ? scan.scannedAt.toDate().toLocaleTimeString('pt-BR') : '...'}
@@ -275,3 +451,4 @@ export function ScannerCaixas() {
     </div>
   );
 }
+

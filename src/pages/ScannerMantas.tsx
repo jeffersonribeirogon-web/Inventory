@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Camera, ArrowLeft, Trash2, Download, Mail, Loader2 } from 'lucide-react';
+import { Camera, ArrowLeft, Trash2, Download, Mail, Loader2, Upload } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Card } from '../components/ui/card';
 import { addToQueue } from '../lib/queue';
@@ -21,6 +21,7 @@ export function ScannerMantas() {
   const navigate = useNavigate();
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [scans, setScans] = useState<MantaScan[]>(() => {
@@ -61,32 +62,7 @@ export function ScannerMantas() {
     return () => stopCamera();
   }, []);
 
-  const captureAndProcess = async () => {
-    if (!videoRef.current || !canvasRef.current) return;
-
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    
-    // Scale down image to avoid Vercel 4.5MB payload limit
-    const MAX_DIMENSION = 1280;
-    let width = video.videoWidth;
-    let height = video.videoHeight;
-    
-    if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
-      const ratio = Math.min(MAX_DIMENSION / width, MAX_DIMENSION / height);
-      width = Math.round(width * ratio);
-      height = Math.round(height * ratio);
-    }
-    
-    canvas.width = width;
-    canvas.height = height;
-    
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    
-    ctx.drawImage(video, 0, 0, width, height);
-    const imageBase64 = canvas.toDataURL('image/jpeg', 0.7);
-    
+  const processImage = async (imageBase64: string) => {
     setIsProcessing(true);
     
     try {
@@ -125,16 +101,94 @@ export function ScannerMantas() {
     }
   };
 
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      const result = e.target?.result as string;
+      if (!result) return;
+      
+      const img = new Image();
+      img.onload = async () => {
+        const canvas = document.createElement('canvas');
+        const MAX_DIMENSION = 1280;
+        let width = img.width;
+        let height = img.height;
+        
+        if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
+          const ratio = Math.min(MAX_DIMENSION / width, MAX_DIMENSION / height);
+          width = Math.round(width * ratio);
+          height = Math.round(height * ratio);
+        }
+        
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, width, height);
+          const imageBase64 = canvas.toDataURL('image/jpeg', 0.7);
+          await processImage(imageBase64);
+        }
+      };
+      img.src = result;
+    };
+    reader.readAsDataURL(file);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const captureAndProcess = async () => {
+    if (!videoRef.current || !canvasRef.current) return;
+
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    
+    // Scale down image to avoid Vercel 4.5MB payload limit
+    const MAX_DIMENSION = 1280;
+    let width = video.videoWidth;
+    let height = video.videoHeight;
+    
+    if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
+      const ratio = Math.min(MAX_DIMENSION / width, MAX_DIMENSION / height);
+      width = Math.round(width * ratio);
+      height = Math.round(height * ratio);
+    }
+    
+    canvas.width = width;
+    canvas.height = height;
+    
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    
+    ctx.drawImage(video, 0, 0, width, height);
+    const imageBase64 = canvas.toDataURL('image/jpeg', 0.7);
+    
+    await processImage(imageBase64);
+  };
+
+  // Confirmation Modals
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [itemToDelete, setItemToDelete] = useState<string | null>(null);
+
   const deleteItem = (id: string) => {
-    if (confirm('Remover este item?')) {
-      setScans(prev => prev.filter(s => s.id !== id));
+    setItemToDelete(id);
+  };
+
+  const confirmDelete = () => {
+    if (itemToDelete) {
+      setScans(prev => prev.filter(s => s.id !== itemToDelete));
+      setItemToDelete(null);
     }
   };
 
   const clearAll = () => {
-    if (confirm('Tem certeza que deseja apagar a lista atual?')) {
-      setScans([]);
-    }
+    setShowClearConfirm(true);
+  };
+
+  const confirmClearAll = () => {
+    setScans([]);
+    setShowClearConfirm(false);
   };
 
   const exportCSV = () => {
@@ -175,6 +229,34 @@ export function ScannerMantas() {
 
   return (
     <div className="min-h-screen bg-[#eeeeee] flex flex-col max-w-lg mx-auto shadow-xl relative">
+      
+      {/* Modals para apagar itens */}
+      {itemToDelete && (
+        <div className="absolute inset-0 z-50 bg-black/60 flex items-center justify-center p-4 backdrop-blur-sm">
+          <Card className="w-full max-w-sm p-6 animate-in fade-in zoom-in duration-200">
+            <h3 className="text-xl font-bold text-neutral-900 mb-2">Remover Item?</h3>
+            <p className="text-neutral-500 mb-6">Tem certeza que deseja apagar este registro?</p>
+            <div className="flex gap-3 justify-end">
+              <Button variant="outline" onClick={() => setItemToDelete(null)} className="flex-1">Cancelar</Button>
+              <Button onClick={confirmDelete} className="flex-1 bg-red-500 hover:bg-red-600 text-white">Apagar</Button>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {showClearConfirm && (
+        <div className="absolute inset-0 z-50 bg-black/60 flex items-center justify-center p-4 backdrop-blur-sm">
+          <Card className="w-full max-w-sm p-6 animate-in fade-in zoom-in duration-200">
+            <h3 className="text-xl font-bold text-neutral-900 mb-2">Apagar tudo?</h3>
+            <p className="text-neutral-500 mb-6">Você tem certeza que deseja remover todos os itens desta lista? Esta ação não pode ser desfeita.</p>
+            <div className="flex gap-3 justify-end">
+              <Button variant="outline" onClick={() => setShowClearConfirm(false)} className="flex-1">Cancelar</Button>
+              <Button onClick={confirmClearAll} className="flex-1 bg-red-500 hover:bg-red-600 text-white">Apagar Tudo</Button>
+            </div>
+          </Card>
+        </div>
+      )}
+
       {isProcessing && (
         <div className="absolute inset-0 z-50 bg-black/60 flex flex-col items-center justify-center text-white backdrop-blur-sm">
           <Loader2 className="h-12 w-12 animate-spin text-[#009988] mb-4" />
@@ -202,7 +284,13 @@ export function ScannerMantas() {
 
       <div className="relative bg-black aspect-[3/4] w-full overflow-hidden flex items-center justify-center">
         {!isCameraActive && !isProcessing && (
-          <p className="text-white">Iniciando câmera...</p>
+          <div className="text-center p-6">
+            <p className="text-white mb-4">Câmera indisponível ou permissão negada.</p>
+            <Button variant="outline" className="bg-white/10 text-white border-white/20 hover:bg-white/20" onClick={() => fileInputRef.current?.click()}>
+              <Upload className="h-5 w-5 mr-2" />
+              Enviar Foto da Galeria
+            </Button>
+          </div>
         )}
         <video 
           ref={videoRef} 
@@ -211,14 +299,31 @@ export function ScannerMantas() {
           className="object-cover w-full h-full"
         />
         <canvas ref={canvasRef} className="hidden" />
+        <input 
+          type="file" 
+          accept="image/*" 
+          capture="environment"
+          ref={fileInputRef} 
+          onChange={handleFileUpload} 
+          className="hidden" 
+        />
         
-        <div className="absolute bottom-6 left-0 right-0 flex justify-center">
+        <div className="absolute bottom-6 left-0 right-0 flex justify-center gap-4">
           <button 
             onClick={captureAndProcess}
             disabled={!isCameraActive || isProcessing}
-            className="h-16 w-16 rounded-full bg-white/20 border-4 border-white flex items-center justify-center active:scale-95 transition-transform"
+            className={`h-16 w-16 rounded-full flex items-center justify-center transition-transform ${isCameraActive && !isProcessing ? 'bg-white/20 border-4 border-white active:scale-95' : 'bg-neutral-800 border-4 border-neutral-600 opacity-50'}`}
           >
             <Camera className="h-6 w-6 text-white" />
+          </button>
+          
+          <button 
+            onClick={() => fileInputRef.current?.click()}
+            disabled={isProcessing}
+            className="h-16 w-16 rounded-full bg-white/10 border-2 border-white/50 flex items-center justify-center active:scale-95 transition-transform"
+            title="Enviar foto da galeria"
+          >
+            <Upload className="h-6 w-6 text-white" />
           </button>
         </div>
       </div>
