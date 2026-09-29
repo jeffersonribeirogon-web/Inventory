@@ -1,12 +1,13 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Trash2, Download, Mail, ScanLine, Camera, Loader2, Upload } from 'lucide-react';
+import { ArrowLeft, Trash2, Download, Mail, ScanLine, Camera, CameraOff, Loader2, Upload, Save, BarChart2 } from 'lucide-react';
 import { collection, addDoc, query, orderBy, onSnapshot, deleteDoc, doc, serverTimestamp, getDocs } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { Button } from '../components/ui/button';
 import { Card } from '../components/ui/card';
 import Papa from 'papaparse';
 import { Html5Qrcode } from 'html5-qrcode';
+import { saveInventoryReport } from '../lib/reports';
 
 interface ScanItem {
   id: string;
@@ -27,6 +28,8 @@ export function ScannerCaixas() {
   const [scans, setScans] = useState<ScanItem[]>([]);
   const [isReading, setIsReading] = useState(false);
   const [cameraError, setCameraError] = useState(false);
+  const [isCameraActive, setIsCameraActive] = useState(true);
+  const isStartingRef = useRef(false);
   
   // Modal states
   const [activeModal, setActiveModal] = useState<'none' | 'katame' | 'local' | 'manual'>('none');
@@ -97,47 +100,80 @@ export function ScannerCaixas() {
     return () => unsubscribe();
   }, []);
 
+  const startScanner = async () => {
+    if (!scannerRef.current || isStartingRef.current) return;
+    try {
+      const state = scannerRef.current.getState();
+      if (state === 2) {
+        setIsCameraActive(true);
+        return;
+      }
+      isStartingRef.current = true;
+      setCameraError(false);
+      await scannerRef.current.start(
+        { facingMode: "environment" },
+        { 
+          fps: 15, 
+          qrbox: { width: 320, height: 160 } 
+        },
+        (decodedText) => {
+          if (isModalOpenRef.current) return; // Ignore scans while popup is open
+
+          const cleanText = decodedText.trim();
+          
+          // Only accept exactly 12 numeric digits
+          if (!/^\d{12}$/.test(cleanText)) return;
+
+          // Auto-capture if barcode starts with '5'
+          const isAutoMatch = cleanText.startsWith('5');
+
+          if (isAutoMatch) {
+            playBeep();
+            setIsReading(false);
+            
+            setCurrentBarcode(cleanText);
+            setActiveModal('katame');
+          }
+        },
+        () => {
+          // Ignore normal scanning errors
+        }
+      );
+      setIsCameraActive(true);
+    } catch (err) {
+      console.error("Camera access error:", err);
+      setCameraError(true);
+      setIsCameraActive(false);
+    } finally {
+      isStartingRef.current = false;
+    }
+  };
+
+  const stopScanner = async () => {
+    if (!scannerRef.current) return;
+    try {
+      const state = scannerRef.current.getState();
+      if (state === 2) {
+        await scannerRef.current.stop();
+      }
+      setIsCameraActive(false);
+    } catch (err) {
+      console.error("Error stopping camera:", err);
+    }
+  };
+
+  const toggleCamera = () => {
+    if (isCameraActive) {
+      stopScanner();
+    } else {
+      startScanner();
+    }
+  };
+
   // Initialize Barcode Scanner
   useEffect(() => {
     const scanner = new Html5Qrcode("reader");
     scannerRef.current = scanner;
-
-    const startScanner = async () => {
-      try {
-        await scanner.start(
-          { facingMode: "environment" },
-          { 
-            fps: 15, 
-            qrbox: { width: 320, height: 160 } 
-          },
-          (decodedText) => {
-            if (isModalOpenRef.current) return; // Ignore scans while popup is open
-
-            const cleanText = decodedText.trim();
-            
-            // Only accept exactly 12 numeric digits
-            if (!/^\d{12}$/.test(cleanText)) return;
-
-            // Auto-capture if barcode starts with '5'
-            const isAutoMatch = cleanText.startsWith('5');
-
-            if (isAutoMatch) {
-              playBeep();
-              setIsReading(false);
-              
-              setCurrentBarcode(cleanText);
-              setActiveModal('katame');
-            }
-          },
-          (error) => {
-            // Ignore normal scanning errors
-          }
-        );
-      } catch (err) {
-        console.error("Camera access error:", err);
-        setCameraError(true);
-      }
-    };
 
     startScanner();
 
@@ -337,12 +373,44 @@ export function ScannerCaixas() {
 
       {showClearConfirm && (
         <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 backdrop-blur-sm">
-          <Card className="w-full max-w-sm p-6 animate-in fade-in zoom-in duration-200">
-            <h3 className="text-xl font-bold text-neutral-900 mb-2">Apagar tudo?</h3>
-            <p className="text-neutral-500 mb-6">Você tem certeza que deseja remover todos os registros do banco de dados? Esta ação não pode ser desfeita.</p>
-            <div className="flex gap-3 justify-end">
-              <Button variant="outline" onClick={() => setShowClearConfirm(false)} className="flex-1">Cancelar</Button>
-              <Button onClick={confirmClearAll} className="flex-1 bg-red-500 hover:bg-red-600 text-white">Apagar Tudo</Button>
+          <Card className="w-full max-w-sm p-6 animate-in fade-in zoom-in duration-200 shadow-2xl">
+            <h3 className="text-xl font-bold text-neutral-900 mb-2">Limpar Leituras Ativas?</h3>
+            <p className="text-sm text-neutral-600 mb-6">
+              Você tem <strong>{scans.length} caixas</strong> registradas. Deseja arquivar o relatório deste inventário no Histórico de Relatórios antes de limpar a tela do scanner?
+            </p>
+            <div className="space-y-2.5">
+              <Button 
+                onClick={async () => {
+                  try {
+                    if (scans.length > 0) {
+                      await saveInventoryReport(scans);
+                    }
+                    await confirmClearAll();
+                    alert("Relatório salvo no histórico com sucesso e leituras do scanner limpas!");
+                  } catch (err) {
+                    console.error(err);
+                    alert("Erro ao arquivar e limpar.");
+                  }
+                }} 
+                className="w-full bg-[#009988] hover:bg-[#008877] text-white font-semibold py-2.5 flex items-center justify-center gap-2"
+              >
+                <Save className="h-4 w-4" />
+                Salvar no Histórico & Limpar
+              </Button>
+              <Button 
+                onClick={confirmClearAll} 
+                variant="outline"
+                className="w-full text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700 py-2 text-xs font-semibold"
+              >
+                Apenas Limpar sem Salvar
+              </Button>
+              <Button 
+                variant="ghost" 
+                onClick={() => setShowClearConfirm(false)} 
+                className="w-full text-neutral-500 py-2 text-xs"
+              >
+                Cancelar
+              </Button>
             </div>
           </Card>
         </div>
@@ -469,7 +537,25 @@ export function ScannerCaixas() {
           </Button>
           <h2 className="font-semibold text-lg text-neutral-900">Scanner Etiquetas (Reuso)</h2>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 items-center">
+          <Button 
+            variant="ghost" 
+            size="icon" 
+            onClick={() => navigate('/relatorio-caixas')} 
+            title="Abrir Relatórios de Inventário"
+            className="text-[#f59e0b] hover:text-[#d97706] hover:bg-amber-50"
+          >
+            <BarChart2 className="h-5 w-5" />
+          </Button>
+          <Button 
+            variant="ghost" 
+            size="icon" 
+            onClick={toggleCamera} 
+            title={isCameraActive ? "Desligar câmera (Economia de energia)" : "Ligar câmera"}
+            className={isCameraActive ? "text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50" : "text-amber-500 hover:text-amber-600 hover:bg-amber-50"}
+          >
+            {isCameraActive ? <Camera className="h-5 w-5" /> : <CameraOff className="h-5 w-5" />}
+          </Button>
           <Button variant="ghost" size="icon" onClick={exportCSV} title="Exportar CSV">
             <Download className="h-5 w-5 text-[#2941CC]" />
           </Button>
@@ -487,17 +573,53 @@ export function ScannerCaixas() {
       )}
 
       <div className="relative bg-black aspect-[3/4] w-full overflow-hidden flex items-center justify-center">
-        {cameraError && (
-          <div className="absolute inset-0 z-10 bg-neutral-900 flex flex-col items-center justify-center p-6 text-center">
-            <p className="text-white mb-4">Câmera indisponível ou permissão negada.</p>
-            <Button variant="outline" className="bg-white/10 text-white border-white/20 hover:bg-white/20" onClick={() => fileInputRef.current?.click()}>
-              <Upload className="h-5 w-5 mr-2" />
-              Enviar Foto da Galeria
-            </Button>
+        {/* Reader element - always kept mounted in DOM */}
+        <div id="reader" className={`w-full h-full [&>video]:object-cover [&>video]:w-full [&>video]:h-full ${!isCameraActive || cameraError ? 'invisible' : ''}`} />
+
+        {/* Standby UI when camera is turned off for power saving */}
+        {!isCameraActive && (
+          <div className="absolute inset-0 z-10 bg-neutral-900/95 flex flex-col items-center justify-center p-6 text-center animate-in fade-in duration-200">
+            <div className="w-14 h-14 rounded-full bg-neutral-800 border border-neutral-700 flex items-center justify-center mb-3">
+              <CameraOff className="h-7 w-7 text-amber-400" />
+            </div>
+            <h4 className="text-white font-semibold text-base mb-1">Câmera em Modo Economia</h4>
+            <p className="text-neutral-400 text-xs max-w-xs mb-5">
+              Câmera desligada para economizar bateria. Você pode ligá-la ou digitar o lote manualmente.
+            </p>
+            <div className="flex flex-wrap gap-2 justify-center">
+              <Button 
+                onClick={startScanner}
+                className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold px-4 py-2 rounded-full shadow-lg"
+              >
+                <Camera className="h-4 w-4 mr-2" />
+                Ligar Câmera
+              </Button>
+              <Button 
+                variant="outline" 
+                onClick={openManualModal}
+                className="bg-white/10 text-white border-white/20 hover:bg-white/20 text-xs px-4 py-2 rounded-full"
+              >
+                Digitar Lote
+              </Button>
+            </div>
           </div>
         )}
-        
-        <div id="reader" className="w-full h-full [&>video]:object-cover [&>video]:w-full [&>video]:h-full" />
+
+        {/* Camera error state */}
+        {cameraError && isCameraActive && (
+          <div className="absolute inset-0 z-10 bg-neutral-900 flex flex-col items-center justify-center p-6 text-center">
+            <p className="text-white mb-4">Câmera indisponível ou permissão negada.</p>
+            <div className="flex gap-2">
+              <Button variant="outline" className="bg-white/10 text-white border-white/20 hover:bg-white/20" onClick={() => startScanner()}>
+                Tentar Novamente
+              </Button>
+              <Button variant="outline" className="bg-white/10 text-white border-white/20 hover:bg-white/20" onClick={() => fileInputRef.current?.click()}>
+                <Upload className="h-4 w-4 mr-2" />
+                Galeria
+              </Button>
+            </div>
+          </div>
+        )}
         
         <input 
           type="file" 
@@ -507,42 +629,87 @@ export function ScannerCaixas() {
           onChange={handleFileUpload} 
           className="hidden" 
         />
-        
-        {/* Overlay instructions */}
-        <div className="absolute inset-x-0 top-6 flex justify-center pointer-events-none z-10">
-          <div className="bg-black/50 text-white px-4 py-2 rounded-full backdrop-blur-md text-sm font-medium flex items-center shadow-lg border border-white/10">
-            <ScanLine className="h-4 w-4 mr-2" />
-            Auto-Scan (Lotes iniciando em 5)
-          </div>
-        </div>
 
-        {/* Capture Button */}
-        {!cameraError && (
-          <div className="absolute bottom-6 left-0 right-0 flex justify-center gap-4 z-10">
-            <button 
-              onClick={openManualModal}
-              className="px-6 h-14 rounded-full flex items-center justify-center transition-transform shadow-xl font-semibold text-sm bg-white/20 border-2 border-white text-white active:scale-95"
-            >
-              Digitar Lote Manualmente
-            </button>
-            <button 
-              onClick={() => fileInputRef.current?.click()}
-              className="h-14 w-14 rounded-full bg-white/10 border-2 border-white/50 flex items-center justify-center active:scale-95 transition-transform"
-              title="Enviar foto da galeria"
-            >
-              <Upload className="h-5 w-5 text-white" />
-            </button>
+        {/* Small Camera ON/OFF toggle button in top-right of camera box */}
+        <button
+          type="button"
+          onClick={toggleCamera}
+          className={`absolute top-4 right-4 z-20 flex items-center gap-1.5 px-3 py-1.5 rounded-full backdrop-blur-md text-xs font-semibold shadow-lg border transition-all ${
+            isCameraActive
+              ? 'bg-emerald-600/85 hover:bg-emerald-600 text-white border-emerald-400/40'
+              : 'bg-neutral-800/90 hover:bg-neutral-700 text-amber-300 border-amber-500/40'
+          }`}
+          title={isCameraActive ? "Desligar câmera para economizar energia" : "Ligar câmera"}
+        >
+          {isCameraActive ? (
+            <>
+              <Camera className="h-3.5 w-3.5" />
+              <span>Câmera ON</span>
+            </>
+          ) : (
+            <>
+              <CameraOff className="h-3.5 w-3.5 text-amber-400" />
+              <span>Câmera OFF</span>
+            </>
+          )}
+        </button>
+        
+        {/* Overlay instructions when camera is active */}
+        {isCameraActive && (
+          <div className="absolute inset-x-0 top-4 left-4 right-auto flex pointer-events-none z-10">
+            <div className="bg-black/60 text-white px-3 py-1.5 rounded-full backdrop-blur-md text-xs font-medium flex items-center shadow-lg border border-white/10">
+              <ScanLine className="h-3.5 w-3.5 mr-1.5" />
+              Auto-Scan (Iniciados em 5)
+            </div>
           </div>
         )}
+
+        {/* Bottom Actions */}
+        <div className="absolute bottom-6 left-0 right-0 flex justify-center gap-3 z-10 px-4">
+          <button 
+            onClick={openManualModal}
+            className="flex-1 max-w-[210px] h-12 rounded-full flex items-center justify-center transition-transform shadow-xl font-semibold text-xs sm:text-sm bg-white/20 border-2 border-white text-white active:scale-95 backdrop-blur-md"
+          >
+            Digitar Lote Manualmente
+          </button>
+          <button 
+            onClick={() => fileInputRef.current?.click()}
+            className="h-12 w-12 rounded-full bg-white/10 border-2 border-white/50 flex items-center justify-center active:scale-95 transition-transform backdrop-blur-md"
+            title="Enviar foto da galeria"
+          >
+            <Upload className="h-5 w-5 text-white" />
+          </button>
+        </div>
       </div>
 
       <div className="flex-1 bg-white p-4 overflow-y-auto">
         <div className="flex items-center justify-between mb-4">
-          <h3 className="font-medium text-neutral-900">Etiquetas Lidas ({scans.length})</h3>
+          <div className="flex items-center gap-2">
+            <h3 className="font-semibold text-neutral-900">Etiquetas Lidas ({scans.length})</h3>
+          </div>
           {scans.length > 0 && (
-            <Button variant="ghost" size="sm" onClick={clearAll} className="text-red-500 hover:text-red-600 hover:bg-red-50">
-              Limpar Tudo
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button 
+                variant="outline" 
+                size="sm" 
+                onClick={async () => {
+                  try {
+                    await saveInventoryReport(scans);
+                    alert("Relatório deste inventário salvo no histórico permanente com sucesso!");
+                  } catch (e) {
+                    console.error(e);
+                    alert("Erro ao salvar relatório.");
+                  }
+                }} 
+                className="text-[#009988] border-[#009988]/30 hover:bg-[#009988]/10 text-xs font-semibold flex items-center gap-1.5 h-8"
+              >
+                <Save className="h-3.5 w-3.5" />
+                Salvar Relatório
+              </Button>
+              <Button variant="ghost" size="sm" onClick={clearAll} className="text-red-500 hover:text-red-600 hover:bg-red-50 text-xs h-8">
+                Limpar Tudo
+              </Button>
+            </div>
           )}
         </div>
         

@@ -1,0 +1,105 @@
+{
+  "entities": {
+    "InventoryScan": {
+      "title": "InventoryScan",
+      "description": "A single scanned box label barcode record",
+      "type": "object",
+      "properties": {
+        "lote": {
+          "type": "string",
+          "description": "Scanned 12-digit barcode"
+        },
+        "composto": {
+          "type": "string",
+          "description": "Katame compound name"
+        },
+        "unidade": {
+          "type": "string",
+          "description": "Storage unit location"
+        },
+        "scannedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of scan"
+        }
+      },
+      "required": ["lote", "composto", "unidade"]
+    },
+    "InventoryReport": {
+      "title": "InventoryReport",
+      "description": "Archived snapshot of a completed daily inventory",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Display title of the inventory"
+        },
+        "dateFormatted": {
+          "type": "string",
+          "description": "Date formatted in pt-BR, e.g. 29/09/2026"
+        },
+        "totalItems": {
+          "type": "number",
+          "description": "Total number of scanned boxes in this inventory"
+        },
+        "byKatame": {
+          "type": "array",
+          "description": "Aggregated count by katame compound"
+        },
+        "byLocal": {
+          "type": "array",
+          "description": "Aggregated count by unit location"
+        },
+        "items": {
+          "type": "array",
+          "description": "List of scanned items in this inventory"
+        },
+        "savedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when this report was finalized and saved"
+        }
+      },
+      "required": ["title", "dateFormatted", "totalItems", "items"]
+    },
+    "MantaScan": {
+      "title": "MantaScan",
+      "description": "A single scanned manta record with barcode, katame and weight",
+      "type": "object",
+      "properties": {
+        "lote": {
+          "type": "string",
+          "description": "Scanned barcode of the manta"
+        },
+        "composto": {
+          "type": "string",
+          "description": "Katame compound name (e.g. REBK)"
+        },
+        "peso": {
+          "type": "string",
+          "description": "Weight in kg"
+        },
+        "scannedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of scan"
+        }
+      },
+      "required": ["lote", "composto", "peso"]
+    }
+  },
+  "firestore": {
+    "/inventory_scans/{scanId}": {
+      "schema": "InventoryScan",
+      "description": "Active collection of raw box barcode scans"
+    },
+    "/inventory_reports/{reportId}": {
+      "schema": "InventoryReport",
+      "description": "Collection of finalized daily inventory reports"
+    },
+    "/mantas_scans/{mantaId}": {
+      "schema": "MantaScan",
+      "description": "Active collection of manta scans with weight"
+    }
+  }
+}

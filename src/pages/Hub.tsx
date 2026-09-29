@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Box, Layers, WifiOff, RefreshCw, Loader2 } from 'lucide-react';
+import { Box, Layers, WifiOff, RefreshCw, Loader2, BarChart } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { getQueue, removeFromQueue, QueuedImage } from '../lib/queue';
@@ -102,7 +102,7 @@ export function Hub() {
         </Card>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-4xl">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 w-full max-w-4xl">
         <Card 
           className="hover:shadow-md transition-shadow cursor-pointer border-[#2941CC]/20 hover:border-[#2941CC]/50 bg-white"
           onClick={() => navigate('/scanner-caixas')}
@@ -139,6 +139,26 @@ export function Hub() {
           <CardContent>
             <Button className="w-full bg-[#009988] hover:bg-[#009988]/90 text-white">
               Acessar Scanner
+            </Button>
+          </CardContent>
+        </Card>
+
+        <Card 
+          className="hover:shadow-md transition-shadow cursor-pointer border-[#f59e0b]/20 hover:border-[#f59e0b]/50 bg-white"
+          onClick={() => navigate('/relatorio-caixas')}
+        >
+          <CardHeader>
+            <div className="h-12 w-12 rounded-lg bg-[#f59e0b]/10 flex items-center justify-center mb-4">
+              <BarChart className="h-6 w-6 text-[#f59e0b]" />
+            </div>
+            <CardTitle>Relatório Caixas</CardTitle>
+            <CardDescription>
+              Dashboard analítico com histórico e indicadores de leituras de inventário das caixas e katames.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button className="w-full bg-[#f59e0b] hover:bg-[#f59e0b]/90 text-white">
+              Ver Relatórios
             </Button>
           </CardContent>
         </Card>

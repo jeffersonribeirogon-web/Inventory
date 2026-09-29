@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { Hub } from './pages/Hub';
 import { ScannerCaixas } from './pages/ScannerCaixas';
 import { ScannerMantas } from './pages/ScannerMantas';
+import { RelatorioCaixas } from './pages/RelatorioCaixas';
 
 export default function App() {
   return (
@@ -11,6 +12,7 @@ export default function App() {
         <Route path="/" element={<Hub />} />
         <Route path="/scanner-caixas" element={<ScannerCaixas />} />
         <Route path="/scanner-mantas" element={<ScannerMantas />} />
+        <Route path="/relatorio-caixas" element={<RelatorioCaixas />} />
       </Routes>
     </BrowserRouter>
   );
