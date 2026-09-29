@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Trash2, Download, Mail, ScanLine, Camera, CameraOff, Loader2, Upload, Save, BarChart2 } from 'lucide-react';
+import { ArrowLeft, Trash2, Download, Mail, ScanLine, Camera, CameraOff, Loader2, Upload, Save, BarChart2, AlertTriangle } from 'lucide-react';
 import { collection, addDoc, query, orderBy, onSnapshot, deleteDoc, doc, serverTimestamp, getDocs } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { Button } from '../components/ui/button';
@@ -18,6 +18,14 @@ interface ScanItem {
   scannedAt?: any;
 }
 
+interface DuplicateInfo {
+  id?: string;
+  lote: string;
+  composto?: string;
+  unidade?: string;
+  scannedAt?: any;
+}
+
 export function ScannerCaixas() {
   const navigate = useNavigate();
   const scannerRef = useRef<Html5Qrcode | null>(null);
@@ -25,7 +33,11 @@ export function ScannerCaixas() {
   const isModalOpenRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   
+  // Scans state + Ref for closure-safe live duplicate checking
   const [scans, setScans] = useState<ScanItem[]>([]);
+  const scansRef = useRef<ScanItem[]>([]);
+  const lastScanTimeRef = useRef<{ code: string; time: number }>({ code: '', time: 0 });
+
   const [isReading, setIsReading] = useState(false);
   const [cameraError, setCameraError] = useState(false);
   const [isCameraActive, setIsCameraActive] = useState(true);
@@ -39,6 +51,13 @@ export function ScannerCaixas() {
   const [manualBarcode, setManualBarcode] = useState('');
 
   const [duplicateError, setDuplicateError] = useState(false);
+  const [duplicateModal, setDuplicateModal] = useState<DuplicateInfo | null>(null);
+  const [highlightedId, setHighlightedId] = useState<string | null>(null);
+
+  // Keep scansRef in sync with scans state
+  useEffect(() => {
+    scansRef.current = scans;
+  }, [scans]);
 
   const playBeep = () => {
     try {
@@ -63,13 +82,63 @@ export function ScannerCaixas() {
     }
   };
 
+  // Urgent dual-pulse low buzzer for duplicate alert
+  const playDuplicateBuzzer = () => {
+    try {
+      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const now = audioCtx.currentTime;
+
+      // Pulse 1
+      const osc1 = audioCtx.createOscillator();
+      const gain1 = audioCtx.createGain();
+      osc1.type = 'sawtooth';
+      osc1.frequency.setValueAtTime(220, now);
+      osc1.frequency.exponentialRampToValueAtTime(130, now + 0.22);
+      gain1.gain.setValueAtTime(0.7, now);
+      gain1.gain.linearRampToValueAtTime(0.01, now + 0.22);
+      osc1.connect(gain1);
+      gain1.connect(audioCtx.destination);
+      osc1.start(now);
+      osc1.stop(now + 0.22);
+
+      // Pulse 2
+      const osc2 = audioCtx.createOscillator();
+      const gain2 = audioCtx.createGain();
+      osc2.type = 'sawtooth';
+      osc2.frequency.setValueAtTime(220, now + 0.28);
+      osc2.frequency.exponentialRampToValueAtTime(110, now + 0.55);
+      gain2.gain.setValueAtTime(0.7, now + 0.28);
+      gain2.gain.linearRampToValueAtTime(0.01, now + 0.55);
+      osc2.connect(gain2);
+      gain2.connect(audioCtx.destination);
+      osc2.start(now + 0.28);
+      osc2.stop(now + 0.55);
+
+      if (typeof navigator !== 'undefined' && navigator.vibrate) {
+        navigator.vibrate([300, 100, 350]);
+      }
+    } catch (e) {
+      console.log("Buzzer play blocked", e);
+    }
+  };
+
+  // Duplicate lookup helper for Caixas (checks both LOTE and COMPOSTO)
+  const checkCaixaDuplicate = (loteTarget: string, compostoTarget: string) => {
+    const cleanLote = loteTarget.trim();
+    const cleanComposto = String(compostoTarget || '').trim().toUpperCase();
+    return scansRef.current.find(s => 
+      String(s.lote || '').trim() === cleanLote &&
+      String(s.composto || '').trim().toUpperCase() === cleanComposto
+    );
+  };
+
   // Sync modal state to ref for the scanner callback
   useEffect(() => {
-    isModalOpenRef.current = activeModal !== 'none';
+    isModalOpenRef.current = activeModal !== 'none' || duplicateModal !== null;
     if (activeModal === 'none') {
       setDuplicateError(false);
     }
-  }, [activeModal]);
+  }, [activeModal, duplicateModal]);
 
   const katames = ["REBK", "RETBK978", "RET", "RESW", "REL", "REP", "RETBSW", "RETB2", "RETB3", "RETB4", "RETBA", "RETK", "REK367"];
   const locais = ["UNIT1", "UNIT2", "UNIT3", "UNIT4", "UNIT5", "UNIT6", "TBR1", "TBR2", "MIX"];
@@ -106,42 +175,74 @@ export function ScannerCaixas() {
       const state = scannerRef.current.getState();
       if (state === 2) {
         setIsCameraActive(true);
+        setCameraError(false);
         return;
       }
       isStartingRef.current = true;
       setCameraError(false);
-      await scannerRef.current.start(
-        { facingMode: "environment" },
-        { 
-          fps: 15, 
-          qrbox: { width: 320, height: 160 } 
-        },
-        (decodedText) => {
-          if (isModalOpenRef.current) return; // Ignore scans while popup is open
 
-          const cleanText = decodedText.trim();
-          
-          // Only accept exactly 12 numeric digits
-          if (!/^\d{12}$/.test(cleanText)) return;
+      const scanConfig = {
+        fps: 15,
+        qrbox: { width: 320, height: 160 }
+      };
 
-          // Auto-capture if barcode starts with '5'
-          const isAutoMatch = cleanText.startsWith('5');
+      const onScanSuccess = (decodedText: string) => {
+        if (isModalOpenRef.current) return; // Ignore scans while popup is open
 
-          if (isAutoMatch) {
-            playBeep();
-            setIsReading(false);
-            
-            setCurrentBarcode(cleanText);
-            setActiveModal('katame');
+        const cleanText = decodedText.trim();
+        
+        // Only accept exactly 12 numeric digits
+        if (!/^\d{12}$/.test(cleanText)) return;
+
+        // Auto-capture if barcode starts with '5'
+        const isAutoMatch = cleanText.startsWith('5');
+
+        if (isAutoMatch) {
+          // Anti-spam debounce
+          const now = Date.now();
+          if (lastScanTimeRef.current.code === cleanText && now - lastScanTimeRef.current.time < 1500) {
+            return;
           }
-        },
-        () => {
-          // Ignore normal scanning errors
+          lastScanTimeRef.current = { code: cleanText, time: now };
+
+          playBeep();
+          setIsReading(false);
+          
+          setCurrentBarcode(cleanText);
+          setActiveModal('katame');
         }
-      );
+      };
+
+      try {
+        await scannerRef.current.start(
+          { facingMode: "environment" },
+          scanConfig,
+          onScanSuccess,
+          () => {}
+        );
+      } catch (firstErr: any) {
+        const errStr = String(firstErr?.name || firstErr?.message || firstErr || '');
+        // If it's a device constraint error (e.g. desktop/laptop has no environment camera), try front/default camera
+        if (
+          !errStr.includes('NotAllowedError') &&
+          !errStr.includes('Permission denied') &&
+          !errStr.includes('NotAllowed')
+        ) {
+          await scannerRef.current.start(
+            { facingMode: "user" },
+            scanConfig,
+            onScanSuccess,
+            () => {}
+          );
+        } else {
+          throw firstErr;
+        }
+      }
+
       setIsCameraActive(true);
-    } catch (err) {
-      console.error("Camera access error:", err);
+      setCameraError(false);
+    } catch (err: any) {
+      console.warn("Camera permission or hardware access notice:", err?.name || err?.message || err);
       setCameraError(true);
       setIsCameraActive(false);
     } finally {
@@ -213,6 +314,7 @@ export function ScannerCaixas() {
       return;
     }
     
+    playBeep();
     setCurrentBarcode(finalBarcode);
     setActiveModal('katame');
   };
@@ -248,20 +350,44 @@ export function ScannerCaixas() {
     }
   };
 
+  // Step 1: Katame confirm -> verifies duplicate (Lote + Katame) before advancing to Step 2: Local
+  const handleKatameConfirm = () => {
+    const cleanKatame = katameInput.trim().toUpperCase();
+    
+    // Checagem de Duplicidade: Executada APÓS a seleção do composto
+    // (Permite lotes iguais com compostos diferentes, mas bloqueia se Lote + Composto forem iguais)
+    const existing = checkCaixaDuplicate(currentBarcode, cleanKatame);
+    if (existing) {
+      playDuplicateBuzzer();
+      setDuplicateModal({
+        id: existing.id,
+        lote: existing.lote || currentBarcode,
+        composto: existing.composto,
+        unidade: existing.unidade,
+        scannedAt: existing.scannedAt
+      });
+      return;
+    }
+
+    setActiveModal('local');
+  };
+
   const saveScan = async (e: React.FormEvent) => {
     e.preventDefault();
     setDuplicateError(false);
     
-    // Duplicate check
-    const isDuplicate = scans.some(scan => 
-      String(scan.lote || '').trim() === currentBarcode.trim() && 
-      String(scan.composto || '').trim() === katameInput.trim() && 
-      String(scan.unidade || '').trim() === localInput.trim()
-    );
-    
-    if (isDuplicate) {
-      setDuplicateError(true);
-      alert("⚠️ DUPLICIDADE DETECTADA: Este Lote já foi registrado com este Katame e Local!");
+    // Robust Duplicate check pre-save (Lote + Katame)
+    const existing = checkCaixaDuplicate(currentBarcode, katameInput);
+    if (existing) {
+      playDuplicateBuzzer();
+      closeModalAndResume();
+      setDuplicateModal({
+        id: existing.id,
+        lote: existing.lote || currentBarcode,
+        composto: existing.composto,
+        unidade: existing.unidade,
+        scannedAt: existing.scannedAt
+      });
       return;
     }
 
@@ -357,6 +483,88 @@ export function ScannerCaixas() {
   return (
     <div className="min-h-screen bg-[#eeeeee] flex flex-col max-w-lg mx-auto shadow-xl relative">
       
+      {/* MODAL DE BLOQUEIO DE DUPLICIDADE (CAIXAS) */}
+      {duplicateModal && (
+        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-4 backdrop-blur-md animate-in fade-in duration-200">
+          <Card className="w-full max-w-sm p-6 bg-white border-2 border-red-500 shadow-2xl rounded-2xl animate-in zoom-in-95 duration-200">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-12 h-12 rounded-full bg-red-100 flex items-center justify-center flex-shrink-0 text-red-600">
+                <AlertTriangle className="h-6 w-6 stroke-[2.5]" />
+              </div>
+              <div>
+                <span className="text-[11px] font-extrabold uppercase tracking-wider text-red-600 bg-red-50 px-2 py-0.5 rounded">
+                  Bloqueio de Duplicidade
+                </span>
+                <h3 className="text-lg font-bold text-neutral-900 leading-tight mt-0.5">
+                  Lote Já Registrado!
+                </h3>
+              </div>
+            </div>
+
+            <p className="text-xs text-neutral-600 mb-4 leading-relaxed">
+              O lote <strong>{duplicateModal.lote}</strong> já foi registrado anteriormente com o composto <strong>{duplicateModal.composto}</strong>. Para evitar contagem dupla, este registro foi bloqueado.
+            </p>
+
+            {/* Previous scan details */}
+            <div className="bg-neutral-50 border border-neutral-200 rounded-xl p-3.5 mb-5 space-y-2">
+              <div className="flex justify-between items-center border-b border-neutral-200/80 pb-2">
+                <span className="text-xs text-neutral-500 font-medium">Lote:</span>
+                <span className="font-mono font-bold text-base text-neutral-900">{duplicateModal.lote}</span>
+              </div>
+              <div className="flex justify-between items-center text-xs">
+                <span className="text-neutral-500 font-medium">Katame (Composto):</span>
+                <span className="font-bold text-[#2941CC] bg-[#2941CC]/10 px-2 py-0.5 rounded">
+                  {duplicateModal.composto || 'NÃO INFORMADO'}
+                </span>
+              </div>
+              {duplicateModal.unidade && (
+                <div className="flex justify-between items-center text-xs">
+                  <span className="text-neutral-500 font-medium">Localização:</span>
+                  <span className="font-bold text-neutral-800 bg-neutral-200 px-2 py-0.5 rounded">
+                    {duplicateModal.unidade}
+                  </span>
+                </div>
+              )}
+              <div className="flex justify-between items-center text-[11px] pt-1 text-neutral-400">
+                <span>Registrado em:</span>
+                <span className="font-medium text-neutral-600">
+                  {duplicateModal.scannedAt?.toDate 
+                    ? duplicateModal.scannedAt.toDate().toLocaleTimeString('pt-BR') 
+                    : 'Hoje'}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <Button
+                onClick={() => setDuplicateModal(null)}
+                className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-xl shadow-lg"
+              >
+                Entendido / Descartar Leitura
+              </Button>
+              {duplicateModal.id && (
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    const id = duplicateModal.id;
+                    setDuplicateModal(null);
+                    setHighlightedId(id);
+                    setTimeout(() => {
+                      const el = document.getElementById(`item-${id}`);
+                      el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }, 150);
+                    setTimeout(() => setHighlightedId(null), 4000);
+                  }}
+                  className="w-full border-neutral-300 text-neutral-700 text-xs py-2"
+                >
+                  Localizar Registro na Lista
+                </Button>
+              )}
+            </div>
+          </Card>
+        </div>
+      )}
+
       {/* Modals para apagar itens */}
       {itemToDelete && (
         <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 backdrop-blur-sm">
@@ -480,7 +688,7 @@ export function ScannerCaixas() {
                 <Button type="button" variant="outline" onClick={cancelScan} className="flex-1">
                   Cancelar
                 </Button>
-                <Button type="button" onClick={() => setActiveModal('local')} className="flex-1 bg-[#009988] hover:bg-[#008877] text-white">
+                <Button type="button" onClick={handleKatameConfirm} className="flex-1 bg-[#009988] hover:bg-[#008877] text-white">
                   Próximo
                 </Button>
               </div>
@@ -576,8 +784,45 @@ export function ScannerCaixas() {
         {/* Reader element - always kept mounted in DOM */}
         <div id="reader" className={`w-full h-full [&>video]:object-cover [&>video]:w-full [&>video]:h-full ${!isCameraActive || cameraError ? 'invisible' : ''}`} />
 
-        {/* Standby UI when camera is turned off for power saving */}
-        {!isCameraActive && (
+        {/* 1. Camera error / Permission Denied state */}
+        {cameraError && (
+          <div className="absolute inset-0 z-10 bg-neutral-900/95 flex flex-col items-center justify-center p-6 text-center animate-in fade-in duration-200">
+            <div className="w-14 h-14 rounded-full bg-amber-500/10 border border-amber-500/30 flex items-center justify-center mb-3">
+              <CameraOff className="h-7 w-7 text-amber-400" />
+            </div>
+            <h4 className="text-white font-bold text-base mb-1">Câmera Indisponível ou Permissão Negada</h4>
+            <p className="text-neutral-300 text-xs max-w-xs mb-5 leading-relaxed">
+              O navegador não concedeu acesso à câmera. Permita o acesso clicando no ícone de permissão na barra de endereços do navegador, ou utilize as opções abaixo:
+            </p>
+            <div className="flex flex-wrap gap-2 justify-center">
+              <Button 
+                onClick={startScanner}
+                className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold px-4 py-2 rounded-full shadow-lg"
+              >
+                <Camera className="h-4 w-4 mr-1.5" />
+                Permitir / Tentar Novamente
+              </Button>
+              <Button 
+                variant="outline" 
+                onClick={openManualModal}
+                className="bg-white/10 text-white border-white/20 hover:bg-white/20 text-xs px-4 py-2 rounded-full"
+              >
+                Digitar Lote
+              </Button>
+              <Button 
+                variant="outline" 
+                onClick={() => fileInputRef.current?.click()}
+                className="bg-white/10 text-white border-white/20 hover:bg-white/20 text-xs px-4 py-2 rounded-full"
+              >
+                <Upload className="h-4 w-4 mr-1.5" />
+                Galeria
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {/* 2. Standby UI when camera is turned off voluntarily for power saving */}
+        {!isCameraActive && !cameraError && (
           <div className="absolute inset-0 z-10 bg-neutral-900/95 flex flex-col items-center justify-center p-6 text-center animate-in fade-in duration-200">
             <div className="w-14 h-14 rounded-full bg-neutral-800 border border-neutral-700 flex items-center justify-center mb-3">
               <CameraOff className="h-7 w-7 text-amber-400" />
@@ -600,22 +845,6 @@ export function ScannerCaixas() {
                 className="bg-white/10 text-white border-white/20 hover:bg-white/20 text-xs px-4 py-2 rounded-full"
               >
                 Digitar Lote
-              </Button>
-            </div>
-          </div>
-        )}
-
-        {/* Camera error state */}
-        {cameraError && isCameraActive && (
-          <div className="absolute inset-0 z-10 bg-neutral-900 flex flex-col items-center justify-center p-6 text-center">
-            <p className="text-white mb-4">Câmera indisponível ou permissão negada.</p>
-            <div className="flex gap-2">
-              <Button variant="outline" className="bg-white/10 text-white border-white/20 hover:bg-white/20" onClick={() => startScanner()}>
-                Tentar Novamente
-              </Button>
-              <Button variant="outline" className="bg-white/10 text-white border-white/20 hover:bg-white/20" onClick={() => fileInputRef.current?.click()}>
-                <Upload className="h-4 w-4 mr-2" />
-                Galeria
               </Button>
             </div>
           </div>
@@ -720,7 +949,15 @@ export function ScannerCaixas() {
             </div>
           ) : (
             scans.map(scan => (
-              <Card key={scan.id} className="p-4 shadow-sm border-neutral-100 relative">
+              <Card 
+                key={scan.id} 
+                id={`item-${scan.id}`}
+                className={`p-4 shadow-sm border relative transition-all duration-300 ${
+                  highlightedId === scan.id 
+                    ? 'border-red-500 ring-4 ring-red-400/50 bg-red-50/60 scale-[1.02]' 
+                    : 'border-neutral-100 bg-white'
+                }`}
+              >
                 <div className="absolute top-2 right-2">
                   <Button variant="ghost" size="icon" onClick={() => deleteItem(scan.id)} className="h-6 w-6">
                     <Trash2 className="h-4 w-4 text-neutral-400 hover:text-red-500" />
