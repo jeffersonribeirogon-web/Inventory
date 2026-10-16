@@ -183,6 +183,9 @@ export function RelatorioCaixas() {
       'Lote (Barcode)': s.lote || '',
       'Composto (Katame)': s.composto || '',
       'Local (Unidade)': s.unidade || '',
+      'Status Base Excel': s.statusConferencia === 'ENCONTRADO' ? 'CONFERIDO NO EXCEL' : (s.statusConferencia === 'FORA_DA_LISTA' ? 'FORA DA BASE (SOBRA)' : 'LIDO'),
+      'Peso Teórico (kg)': s.pesoTeorico || '',
+      'Peso Real (kg)': s.pesoReal || '',
       'Data/Hora': s.scannedAt?.toDate ? s.scannedAt.toDate().toLocaleString('pt-BR') : 'N/A'
     }));
     const csv = Papa.unparse(csvData);
@@ -195,6 +198,9 @@ export function RelatorioCaixas() {
       'Lote (Barcode)': s.lote || '',
       'Composto (Katame)': s.composto || '',
       'Local (Unidade)': s.unidade || '',
+      'Status Base Excel': s.statusConferencia === 'ENCONTRADO' ? 'CONFERIDO NO EXCEL' : (s.statusConferencia === 'FORA_DA_LISTA' ? 'FORA DA BASE (SOBRA)' : (s.statusConferencia || 'LIDO')),
+      'Peso Teórico (kg)': s.pesoTeorico || '',
+      'Peso Real (kg)': s.pesoReal || '',
       'Data/Hora': s.scannedAt || ''
     }));
     const csv = Papa.unparse(csvData);
@@ -214,6 +220,9 @@ export function RelatorioCaixas() {
           'Lote (Barcode)': item.lote,
           'Composto (Katame)': item.composto,
           'Local (Unidade)': item.unidade,
+          'Status Base Excel': item.statusConferencia === 'ENCONTRADO' ? 'CONFERIDO NO EXCEL' : (item.statusConferencia === 'FORA_DA_LISTA' ? 'FORA DA BASE (SOBRA)' : (item.statusConferencia || 'LIDO')),
+          'Peso Teórico (kg)': item.pesoTeorico || '',
+          'Peso Real (kg)': item.pesoReal || '',
           'Hora da Leitura': item.scannedAt
         });
       });
@@ -739,6 +748,8 @@ export function RelatorioCaixas() {
                           <th className="p-3">Lote (Código)</th>
                           <th className="p-3">Katame</th>
                           <th className="p-3">Local</th>
+                          <th className="p-3">Status Excel</th>
+                          <th className="p-3">Pesos</th>
                           <th className="p-3">Data / Hora</th>
                         </tr>
                       </thead>
@@ -756,6 +767,28 @@ export function RelatorioCaixas() {
                               <span className="inline-block bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded text-xs">
                                 {item.unidade}
                               </span>
+                            </td>
+                            <td className="p-3">
+                              {item.statusConferencia === 'ENCONTRADO' && (
+                                <span className="inline-block bg-emerald-50 text-emerald-700 border border-emerald-200 font-bold px-2 py-0.5 rounded text-[10px]">
+                                  ✓ EXCEL OK
+                                </span>
+                              )}
+                              {item.statusConferencia === 'FORA_DA_LISTA' && (
+                                <span className="inline-block bg-amber-50 text-amber-700 border border-amber-200 font-bold px-2 py-0.5 rounded text-[10px]">
+                                  ⚠️ FORA DA LISTA
+                                </span>
+                              )}
+                              {!item.statusConferencia && (
+                                <span className="text-neutral-400 text-xs">-</span>
+                              )}
+                            </td>
+                            <td className="p-3 text-xs text-neutral-600">
+                              {item.pesoTeorico || item.pesoReal ? (
+                                <span>Teór: {item.pesoTeorico || '-'} | Real: <strong>{item.pesoReal || '-'} kg</strong></span>
+                              ) : (
+                                <span className="text-neutral-400 text-xs">-</span>
+                              )}
                             </td>
                             <td className="p-3 text-neutral-500 text-xs">
                               {item.scannedAt?.toDate ? item.scannedAt.toDate().toLocaleString('pt-BR') : 'Agora'}
@@ -949,6 +982,8 @@ export function RelatorioCaixas() {
                           <th className="p-3">Lote (Código)</th>
                           <th className="p-3">Katame</th>
                           <th className="p-3">Local</th>
+                          <th className="p-3">Status Excel</th>
+                          <th className="p-3">Pesos</th>
                           <th className="p-3">Hora da Leitura</th>
                         </tr>
                       </thead>
@@ -966,6 +1001,28 @@ export function RelatorioCaixas() {
                               <span className="inline-block bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded text-xs">
                                 {item.unidade}
                               </span>
+                            </td>
+                            <td className="p-3">
+                              {item.statusConferencia === 'ENCONTRADO' && (
+                                <span className="inline-block bg-emerald-50 text-emerald-700 border border-emerald-200 font-bold px-2 py-0.5 rounded text-[10px]">
+                                  ✓ EXCEL OK
+                                </span>
+                              )}
+                              {item.statusConferencia === 'FORA_DA_LISTA' && (
+                                <span className="inline-block bg-amber-50 text-amber-700 border border-amber-200 font-bold px-2 py-0.5 rounded text-[10px]">
+                                  ⚠️ FORA DA LISTA
+                                </span>
+                              )}
+                              {!item.statusConferencia && (
+                                <span className="text-neutral-400 text-xs">-</span>
+                              )}
+                            </td>
+                            <td className="p-3 text-xs text-neutral-600">
+                              {item.pesoTeorico || item.pesoReal ? (
+                                <span>Teór: {item.pesoTeorico || '-'} | Real: <strong>{item.pesoReal || '-'} kg</strong></span>
+                              ) : (
+                                <span className="text-neutral-400 text-xs">-</span>
+                              )}
                             </td>
                             <td className="p-3 text-neutral-500 text-xs">
                               {item.scannedAt || '-'}

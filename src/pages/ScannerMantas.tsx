@@ -531,7 +531,7 @@ export function ScannerMantas() {
       
       {/* MODAL DE BLOQUEIO DE DUPLICIDADE */}
       {duplicateModal && (
-        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-4 backdrop-blur-md animate-in fade-in duration-200">
+        <div className="fixed inset-0 z-[100] bg-black/85 flex items-center justify-center p-4 backdrop-blur-md animate-in fade-in duration-200">
           <Card className="w-full max-w-sm p-6 bg-white border-2 border-red-500 shadow-2xl rounded-2xl animate-in zoom-in-95 duration-200">
             <div className="flex items-center gap-3 mb-4">
               <div className="w-12 h-12 rounded-full bg-red-100 flex items-center justify-center flex-shrink-0 text-red-600">

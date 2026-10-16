@@ -8,6 +8,9 @@ export interface ScanItemData {
   unidade?: string;
   dataExpiracao?: string;
   scannedAt?: any;
+  statusConferencia?: 'ENCONTRADO' | 'FORA_DA_LISTA';
+  pesoTeorico?: string | number;
+  pesoReal?: string | number;
 }
 
 export interface SavedReportItem {
@@ -16,6 +19,9 @@ export interface SavedReportItem {
   unidade: string;
   dataExpiracao?: string;
   scannedAt: string;
+  statusConferencia?: string;
+  pesoTeorico?: string | number;
+  pesoReal?: string | number;
 }
 
 export interface SavedReport {
@@ -78,6 +84,9 @@ export async function saveInventoryReport(
       composto: String(s.composto || ''),
       unidade: String(s.unidade || ''),
       dataExpiracao: s.dataExpiracao || '',
+      statusConferencia: s.statusConferencia || '',
+      pesoTeorico: s.pesoTeorico !== undefined ? s.pesoTeorico : '',
+      pesoReal: s.pesoReal !== undefined ? s.pesoReal : '',
       scannedAt: dateStr || now.toLocaleString('pt-BR')
     };
   });

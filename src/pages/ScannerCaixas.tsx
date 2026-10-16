@@ -1,13 +1,25 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Trash2, Download, Mail, ScanLine, Camera, CameraOff, Loader2, Upload, Save, BarChart2, AlertTriangle } from 'lucide-react';
+import { 
+  ArrowLeft, Trash2, Download, Mail, ScanLine, Camera, CameraOff, 
+  Loader2, Upload, Save, BarChart2, AlertTriangle, FileSpreadsheet, 
+  CheckCircle2, X, Check 
+} from 'lucide-react';
 import { collection, addDoc, query, orderBy, onSnapshot, deleteDoc, doc, serverTimestamp, getDocs } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { Button } from '../components/ui/button';
 import { Card } from '../components/ui/card';
 import Papa from 'papaparse';
+import * as XLSX from 'xlsx';
 import { Html5Qrcode } from 'html5-qrcode';
 import { saveInventoryReport } from '../lib/reports';
+
+export interface ExcelCaixaItem {
+  composto: string;
+  lote: string; // 7 digits
+  peso: string | number;
+  pesoReal: string | number;
+}
 
 interface ScanItem {
   id: string;
@@ -16,6 +28,10 @@ interface ScanItem {
   unidade?: string;
   dataExpiracao?: string;
   scannedAt?: any;
+  lote7?: string;
+  pesoTeorico?: string | number;
+  pesoReal?: string | number;
+  statusConferencia?: 'ENCONTRADO' | 'FORA_DA_LISTA';
 }
 
 interface DuplicateInfo {
@@ -53,6 +69,26 @@ export function ScannerCaixas() {
   const [duplicateError, setDuplicateError] = useState(false);
   const [duplicateModal, setDuplicateModal] = useState<DuplicateInfo | null>(null);
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
+
+  // Base Excel cross-referencing states
+  const [excelBase, setExcelBase] = useState<ExcelCaixaItem[]>(() => {
+    try {
+      const saved = localStorage.getItem('katame_excel_base_caixas');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [excelFoundModal, setExcelFoundModal] = useState<{
+    barcode: string;
+    lote7: string;
+    composto: string;
+    peso: string | number;
+    pesoReal: string | number;
+  } | null>(null);
+  const [showPendingModal, setShowPendingModal] = useState(false);
+  const [isOutOfExcelBase, setIsOutOfExcelBase] = useState(false);
+  const excelFileInputRef = useRef<HTMLInputElement>(null);
 
   // Keep scansRef in sync with scans state
   useEffect(() => {
@@ -132,13 +168,191 @@ export function ScannerCaixas() {
     );
   };
 
+  // Extrai os últimos 7 dígitos do código de barras de 12 dígitos para cruzar com o Excel
+  const extract7Digits = (barcode: string) => {
+    const clean = String(barcode || '').trim().replace(/\.0+$/, '');
+    return clean.length >= 7 ? clean.slice(-7) : clean.padStart(7, '0');
+  };
+
+  // Processamento unificado de código lido (câmera, manual ou galeria)
+  const processScannedBarcode = (cleanBarcode: string) => {
+    setCurrentBarcode(cleanBarcode);
+
+    // Se houver uma base Excel carregada, faz o cruzamento pelos últimos 7 dígitos!
+    if (excelBase.length > 0) {
+      const lote7 = extract7Digits(cleanBarcode);
+      const matched = excelBase.find(item => item.lote === lote7);
+
+      if (matched) {
+        // CENÁRIO A: ENCONTRADO NO EXCEL!
+        // Checa duplicidade do lote com o composto retornado da planilha
+        const isDup = checkCaixaDuplicate(cleanBarcode, matched.composto);
+        if (isDup) {
+          playDuplicateBuzzer();
+          setDuplicateModal({
+            id: isDup.id,
+            lote: isDup.lote || cleanBarcode,
+            composto: isDup.composto,
+            unidade: isDup.unidade,
+            scannedAt: isDup.scannedAt
+          });
+          return;
+        }
+
+        playBeep();
+        setIsReading(false);
+        setIsOutOfExcelBase(false);
+        setKatameInput(matched.composto);
+        setExcelFoundModal({
+          barcode: cleanBarcode,
+          lote7: matched.lote,
+          composto: matched.composto,
+          peso: matched.peso,
+          pesoReal: matched.pesoReal
+        });
+        return;
+      } else {
+        // CENÁRIO B: NÃO CONSTA NO EXCEL!
+        // "Quando eu ler um lote que não consta na base do excel deve abrir todo o fluxo de registro igual ja temos"
+        playBeep();
+        setIsReading(false);
+        setIsOutOfExcelBase(true);
+        setActiveModal('katame');
+        return;
+      }
+    }
+
+    // Fluxo padrão caso nenhuma base Excel esteja carregada
+    playBeep();
+    setIsReading(false);
+    setIsOutOfExcelBase(false);
+    setActiveModal('katame');
+  };
+
+  // Parser inteligente de arquivos Excel (.xlsx / .csv)
+  const handleExcelBaseUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const data = new Uint8Array(evt.target?.result as ArrayBuffer);
+        const workbook = XLSX.read(data, { type: 'array' });
+        const firstSheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[firstSheetName];
+        
+        // Linhas brutas como matriz 2D
+        const rawRows: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
+
+        // Localiza a linha de cabeçalho que contenha COMPOSTO e LOTE
+        let headerRowIndex = -1;
+        let colComposto = -1;
+        let colLote = -1;
+        let colPeso = -1;
+        let colPesoReal = -1;
+
+        for (let r = 0; r < Math.min(rawRows.length, 12); r++) {
+          const row = rawRows[r];
+          if (!row || !Array.isArray(row)) continue;
+
+          let foundLote = -1;
+          let foundComp = -1;
+
+          row.forEach((cell, idx) => {
+            const str = String(cell || '').trim().toUpperCase();
+            if (
+              str.includes('LOTE') || str === 'CODIGO' || str === 'LOT' || 
+              str.includes('BARCODE') || str.includes('ETIQUETA')
+            ) {
+              foundLote = idx;
+            }
+            if (
+              str.includes('COMPOSTO') || str.includes('KATAME') || str.includes('PROD') || 
+              str.includes('COMP') || str.includes('MATERIAL')
+            ) {
+              foundComp = idx;
+            }
+          });
+
+          if (foundLote !== -1 && foundComp !== -1) {
+            headerRowIndex = r;
+            colLote = foundLote;
+            colComposto = foundComp;
+
+            // Identifica colunas de PESO e PESO REAL
+            row.forEach((cell, idx) => {
+              const str = String(cell || '').trim().toUpperCase();
+              if (str.includes('REAL')) {
+                colPesoReal = idx;
+              } else if (str.includes('PESO') || str.includes('TEORICO') || str.includes('KG')) {
+                colPeso = idx;
+              }
+            });
+            break;
+          }
+        }
+
+        // Se não localizou cabeçalho com texto explícito, tenta detecção por ordem padrão:
+        // Coluna 0: Composto | Coluna 1: Lote | Coluna 2: Peso | Coluna 3: Peso Real
+        if (headerRowIndex === -1 && rawRows.length > 0) {
+          headerRowIndex = 0;
+          colComposto = 0;
+          colLote = 1;
+          colPeso = 2;
+          colPesoReal = 3;
+        }
+
+        const items: ExcelCaixaItem[] = [];
+        for (let r = headerRowIndex + 1; r < rawRows.length; r++) {
+          const row = rawRows[r];
+          if (!row || !Array.isArray(row)) continue;
+
+          const rawLote = String(row[colLote] ?? '').trim();
+          if (!rawLote) continue;
+
+          const cleanLote = rawLote.replace(/\.0+$/, '').trim();
+          if (!cleanLote || cleanLote.toUpperCase().includes('LOTE')) continue;
+
+          // Normaliza lote para 7 dígitos (ex: 1013061 ou com zero 0929006)
+          const lote7 = cleanLote.length >= 7 ? cleanLote.slice(-7) : cleanLote.padStart(7, '0');
+          const composto = String(row[colComposto] ?? '').trim().toUpperCase() || 'REBK';
+          const peso = colPeso !== -1 ? String(row[colPeso] ?? '').trim() : '';
+          const pesoReal = colPesoReal !== -1 ? String(row[colPesoReal] ?? '').trim() : '';
+
+          items.push({
+            lote: lote7,
+            composto,
+            peso,
+            pesoReal
+          });
+        }
+
+        if (items.length === 0) {
+          alert("Nenhuma linha com lote válido foi encontrada na planilha. Verifique as colunas 'COMPOSTO' e 'LOTE'.");
+          return;
+        }
+
+        setExcelBase(items);
+        localStorage.setItem('katame_excel_base_caixas', JSON.stringify(items));
+        alert(`✅ Base Excel importada com sucesso!\nTotal de caixas carregadas: ${items.length}`);
+      } catch (err) {
+        console.error("Erro ao importar Excel:", err);
+        alert("Erro ao ler o arquivo Excel. Verifique se o formato é válido (.xlsx, .xls ou .csv).");
+      } finally {
+        if (excelFileInputRef.current) excelFileInputRef.current.value = '';
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
   // Sync modal state to ref for the scanner callback
   useEffect(() => {
-    isModalOpenRef.current = activeModal !== 'none' || duplicateModal !== null;
+    isModalOpenRef.current = activeModal !== 'none' || duplicateModal !== null || excelFoundModal !== null || showPendingModal;
     if (activeModal === 'none') {
       setDuplicateError(false);
     }
-  }, [activeModal, duplicateModal]);
+  }, [activeModal, duplicateModal, excelFoundModal, showPendingModal]);
 
   const katames = ["REBK", "RETBK978", "RET", "RESW", "REL", "REP", "RETBSW", "RETB2", "RETB3", "RETB4", "RETBA", "RETK", "REK367"];
   const locais = ["UNIT1", "UNIT2", "UNIT3", "UNIT4", "UNIT5", "UNIT6", "TBR1", "TBR2", "MIX"];
@@ -205,11 +419,7 @@ export function ScannerCaixas() {
           }
           lastScanTimeRef.current = { code: cleanText, time: now };
 
-          playBeep();
-          setIsReading(false);
-          
-          setCurrentBarcode(cleanText);
-          setActiveModal('katame');
+          processScannedBarcode(cleanText);
         }
       };
 
@@ -314,9 +524,7 @@ export function ScannerCaixas() {
       return;
     }
     
-    playBeep();
-    setCurrentBarcode(finalBarcode);
-    setActiveModal('katame');
+    processScannedBarcode(finalBarcode);
   };
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -338,9 +546,7 @@ export function ScannerCaixas() {
         return;
       }
       
-      playBeep();
-      setCurrentBarcode(cleanText);
-      setActiveModal('katame');
+      processScannedBarcode(cleanText);
     } catch (err) {
       console.error(err);
       alert("Nenhum código de barras encontrado na imagem.");
@@ -391,19 +597,69 @@ export function ScannerCaixas() {
       return;
     }
 
+    const lote7 = extract7Digits(currentBarcode);
+    const statusConf = excelBase.length > 0 ? 'FORA_DA_LISTA' : undefined;
+
     try {
       await addDoc(collection(db, 'inventory_scans'), {
         lote: currentBarcode,
+        lote7: lote7,
         composto: katameInput,
         unidade: localInput,
+        statusConferencia: statusConf,
         scannedAt: serverTimestamp()
       });
       
       closeModalAndResume();
     } catch (err) {
       console.error(err);
-      alert("Erro ao salvar dados.");
+      const newScan: ScanItem = {
+        id: crypto.randomUUID(),
+        lote: currentBarcode,
+        lote7: lote7,
+        composto: katameInput,
+        unidade: localInput,
+        statusConferencia: statusConf,
+        scannedAt: new Date()
+      };
+      setScans(prev => [newScan, ...prev]);
+      closeModalAndResume();
     }
+  };
+
+  // Salva a leitura de uma caixa confirmada pelo cruzamento do Excel
+  const confirmSaveExcelFound = async () => {
+    if (!excelFoundModal) return;
+
+    try {
+      await addDoc(collection(db, 'inventory_scans'), {
+        lote: excelFoundModal.barcode,
+        lote7: excelFoundModal.lote7,
+        composto: excelFoundModal.composto,
+        unidade: localInput || 'UNIT1',
+        pesoTeorico: excelFoundModal.peso,
+        pesoReal: excelFoundModal.pesoReal,
+        statusConferencia: 'ENCONTRADO',
+        scannedAt: serverTimestamp()
+      });
+    } catch (err) {
+      console.error(err);
+      const newScan: ScanItem = {
+        id: crypto.randomUUID(),
+        lote: excelFoundModal.barcode,
+        lote7: excelFoundModal.lote7,
+        composto: excelFoundModal.composto,
+        unidade: localInput || 'UNIT1',
+        pesoTeorico: excelFoundModal.peso,
+        pesoReal: excelFoundModal.pesoReal,
+        statusConferencia: 'ENCONTRADO',
+        scannedAt: new Date()
+      };
+      setScans(prev => [newScan, ...prev]);
+    }
+
+    setExcelFoundModal(null);
+    setCurrentBarcode('');
   };
 
   const cancelScan = () => {
@@ -416,6 +672,7 @@ export function ScannerCaixas() {
     // Always reset local to UNIT1:
     setLocalInput('UNIT1');
     setCurrentBarcode('');
+    setIsOutOfExcelBase(false);
   };
 
   // Confirmation Modals
@@ -447,12 +704,23 @@ export function ScannerCaixas() {
     await Promise.all(deletePromises);
   };
 
+  const foundLotesSet = new Set(
+    scans.map(s => s.lote7 || (s.lote ? extract7Digits(s.lote) : ''))
+  );
+  const pendingExcelItems = excelBase.filter(item => !foundLotesSet.has(item.lote));
+  const foundExcelCount = excelBase.length - pendingExcelItems.length;
+
   const exportCSV = () => {
     const csvData = scans.map(s => ({
-      'Lote (Barcode)': s.lote || '',
+      'Lote (Barcode 12 dig)': s.lote || '',
+      'Lote (7 dig)': s.lote7 || (s.lote ? extract7Digits(s.lote) : ''),
       'Composto': s.composto || '',
-      'Unidade': s.unidade || '',
-      'Data Expiração': s.dataExpiracao || '',
+      'Unidade (Local)': s.unidade || '',
+      'Status Base Excel': s.statusConferencia === 'ENCONTRADO' 
+        ? 'CONFERIDO NO EXCEL' 
+        : (s.statusConferencia === 'FORA_DA_LISTA' ? 'FORA DA BASE (SOBRA)' : 'LIDO'),
+      'Peso Teórico (kg)': s.pesoTeorico || '',
+      'Peso Real (kg)': s.pesoReal || '',
       'Data/Hora (App)': s.scannedAt?.toDate() ? s.scannedAt.toDate().toLocaleString('pt-BR') : 'N/A'
     }));
     const csv = Papa.unparse(csvData);
@@ -460,7 +728,7 @@ export function ScannerCaixas() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.setAttribute('download', `inventario_reuso_${new Date().toISOString()}.csv`);
+    link.setAttribute('download', `inventario_caixas_${new Date().toISOString().slice(0, 10)}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -468,15 +736,20 @@ export function ScannerCaixas() {
 
   const sendEmail = () => {
     const csvData = scans.map(s => ({
-      'Lote (Barcode)': s.lote || '',
+      'Lote (Barcode 12 dig)': s.lote || '',
+      'Lote (7 dig)': s.lote7 || (s.lote ? extract7Digits(s.lote) : ''),
       'Composto': s.composto || '',
-      'Unidade': s.unidade || '',
-      'Data Expiração': s.dataExpiracao || '',
+      'Unidade (Local)': s.unidade || '',
+      'Status Base Excel': s.statusConferencia === 'ENCONTRADO' 
+        ? 'CONFERIDO NO EXCEL' 
+        : (s.statusConferencia === 'FORA_DA_LISTA' ? 'FORA DA BASE (SOBRA)' : 'LIDO'),
+      'Peso Teórico (kg)': s.pesoTeorico || '',
+      'Peso Real (kg)': s.pesoReal || '',
       'Data/Hora (App)': s.scannedAt?.toDate() ? s.scannedAt.toDate().toLocaleString('pt-BR') : 'N/A'
     }));
     const csv = Papa.unparse(csvData);
-    const subject = encodeURIComponent("Inventário de Etiquetas de Reuso");
-    const body = encodeURIComponent("Segue em anexo os dados do inventário (Cole os dados abaixo no Excel):\n\n" + csv);
+    const subject = encodeURIComponent("Inventário de Caixas de Katame");
+    const body = encodeURIComponent("Segue os dados do inventário de caixas coletados pelo app:\n\n" + csv);
     window.location.href = `mailto:?subject=${subject}&body=${body}`;
   };
 
@@ -485,7 +758,7 @@ export function ScannerCaixas() {
       
       {/* MODAL DE BLOQUEIO DE DUPLICIDADE (CAIXAS) */}
       {duplicateModal && (
-        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-4 backdrop-blur-md animate-in fade-in duration-200">
+        <div className="fixed inset-0 z-[100] bg-black/85 flex items-center justify-center p-4 backdrop-blur-md animate-in fade-in duration-200">
           <Card className="w-full max-w-sm p-6 bg-white border-2 border-red-500 shadow-2xl rounded-2xl animate-in zoom-in-95 duration-200">
             <div className="flex items-center gap-3 mb-4">
               <div className="w-12 h-12 rounded-full bg-red-100 flex items-center justify-center flex-shrink-0 text-red-600">
@@ -537,29 +810,201 @@ export function ScannerCaixas() {
 
             <div className="flex flex-col gap-2">
               <Button
-                onClick={() => setDuplicateModal(null)}
+                onClick={() => {
+                  setDuplicateModal(null);
+                  closeModalAndResume();
+                }}
                 className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-xl shadow-lg"
               >
-                Entendido / Descartar Leitura
+                Descartar Leitura
               </Button>
-              {duplicateModal.id && (
+              <div className="flex gap-2">
                 <Button
                   variant="outline"
                   onClick={() => {
-                    const id = duplicateModal.id;
                     setDuplicateModal(null);
-                    setHighlightedId(id);
-                    setTimeout(() => {
-                      const el = document.getElementById(`item-${id}`);
-                      el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                    }, 150);
-                    setTimeout(() => setHighlightedId(null), 4000);
+                    setActiveModal('katame');
                   }}
-                  className="w-full border-neutral-300 text-neutral-700 text-xs py-2"
+                  className="flex-1 border-neutral-300 text-neutral-700 text-xs py-2"
                 >
-                  Localizar Registro na Lista
+                  Trocar Composto
                 </Button>
+                {duplicateModal.id && (
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      const id = duplicateModal.id;
+                      setDuplicateModal(null);
+                      closeModalAndResume();
+                      setHighlightedId(id);
+                      setTimeout(() => {
+                        const el = document.getElementById(`item-${id}`);
+                        el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                      }, 150);
+                      setTimeout(() => setHighlightedId(null), 4000);
+                    }}
+                    className="flex-1 border-neutral-300 text-neutral-700 text-xs py-2"
+                  >
+                    Ver na Lista
+                  </Button>
+                )}
+              </div>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {/* MODAL: CAIXA ENCONTRADA NA BASE EXCEL */}
+      {excelFoundModal && (
+        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-4 backdrop-blur-sm animate-in fade-in duration-200">
+          <Card className="w-full max-w-sm p-6 bg-white border-2 border-emerald-500 shadow-2xl rounded-2xl animate-in zoom-in-95 duration-200">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-12 h-12 rounded-full bg-emerald-100 flex items-center justify-center flex-shrink-0 text-emerald-600">
+                <CheckCircle2 className="h-7 w-7" />
+              </div>
+              <div>
+                <span className="text-[11px] font-extrabold uppercase tracking-wider text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                  Cruzamento Excel OK
+                </span>
+                <h3 className="text-lg font-bold text-neutral-900 leading-tight mt-0.5">
+                  Caixa Encontrada!
+                </h3>
+              </div>
+            </div>
+
+            <p className="text-xs text-neutral-600 mb-4 leading-relaxed">
+              O lote conferiu com a lista da área. Dados retornados da planilha:
+            </p>
+
+            <div className="bg-neutral-50 border border-neutral-200 rounded-xl p-3.5 mb-5 space-y-2.5">
+              <div className="flex justify-between items-center border-b border-neutral-200/80 pb-2">
+                <span className="text-xs text-neutral-500 font-medium">Barcode Lido:</span>
+                <span className="font-mono font-bold text-sm text-neutral-800">
+                  {excelFoundModal.barcode.length >= 7 
+                    ? excelFoundModal.barcode.slice(0, -7)
+                    : ''}
+                  <span className="text-emerald-600 bg-emerald-50 px-1 rounded underline font-extrabold">
+                    {excelFoundModal.lote7}
+                  </span>
+                </span>
+              </div>
+              
+              <div className="flex justify-between items-center text-xs">
+                <span className="text-neutral-500 font-medium">Composto (Katame):</span>
+                <span className="font-bold text-base text-[#2941CC] bg-[#2941CC]/10 px-2.5 py-0.5 rounded">
+                  {excelFoundModal.composto}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 pt-1 border-t border-neutral-200/60">
+                <div className="bg-white p-2 rounded-lg border border-neutral-200">
+                  <span className="block text-[10px] text-neutral-400 uppercase font-semibold">Peso Teórico</span>
+                  <span className="font-bold text-sm text-neutral-800">
+                    {excelFoundModal.peso ? `${excelFoundModal.peso} kg` : '-'}
+                  </span>
+                </div>
+                <div className="bg-white p-2 rounded-lg border border-emerald-200 bg-emerald-50/40">
+                  <span className="block text-[10px] text-emerald-700 uppercase font-semibold">Peso Real</span>
+                  <span className="font-bold text-sm text-emerald-900">
+                    {excelFoundModal.pesoReal ? `${excelFoundModal.pesoReal} kg` : '-'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="pt-2 border-t border-neutral-200/80">
+                <label className="block text-[11px] font-semibold text-neutral-600 mb-1">
+                  Localização:
+                </label>
+                <select
+                  value={localInput}
+                  onChange={(e) => setLocalInput(e.target.value)}
+                  className="w-full border border-neutral-300 rounded-lg p-2 text-sm bg-white font-medium focus:ring-[#009988] focus:border-[#009988]"
+                >
+                  {locais.map((l) => (
+                    <option key={l} value={l}>{l}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setExcelFoundModal(null);
+                  setCurrentBarcode('');
+                }}
+                className="flex-1 border-neutral-300 text-neutral-600 text-xs py-2.5"
+              >
+                Descartar
+              </Button>
+              <Button
+                onClick={confirmSaveExcelFound}
+                className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm py-2.5 shadow-lg flex items-center justify-center gap-1.5"
+              >
+                <Check className="h-4 w-4" />
+                Confirmar
+              </Button>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {/* MODAL: ITENS PENDENTES DA BASE EXCEL */}
+      {showPendingModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-sm animate-in fade-in duration-200">
+          <Card className="w-full max-w-md max-h-[85vh] flex flex-col p-5 bg-white shadow-2xl rounded-2xl animate-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between pb-3 border-b border-neutral-200 mb-3">
+              <div>
+                <h3 className="text-base font-bold text-neutral-900 flex items-center gap-2">
+                  <FileSpreadsheet className="h-5 w-5 text-emerald-600" />
+                  Caixas Pendentes ({pendingExcelItems.length})
+                </h3>
+                <p className="text-xs text-neutral-500">
+                  Caixas da base Excel que ainda não foram bipadas
+                </p>
+              </div>
+              <Button variant="ghost" size="icon" onClick={() => setShowPendingModal(false)} className="h-8 w-8">
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto space-y-2 pr-1">
+              {pendingExcelItems.length === 0 ? (
+                <div className="text-center py-10 text-neutral-500 text-sm">
+                  <CheckCircle2 className="h-10 w-10 text-emerald-500 mx-auto mb-2" />
+                  <p className="font-bold text-emerald-800">Todas as caixas foram encontradas!</p>
+                  <p className="text-xs text-neutral-400 mt-1">100% da lista Excel conferida na área.</p>
+                </div>
+              ) : (
+                pendingExcelItems.map((item, idx) => (
+                  <div key={idx} className="p-3 bg-neutral-50 border border-neutral-200 rounded-xl flex items-center justify-between">
+                    <div>
+                      <div className="flex items-center gap-1.5 mb-0.5">
+                        <span className="font-bold text-xs bg-[#2941CC]/10 text-[#2941CC] px-2 py-0.5 rounded">
+                          {item.composto}
+                        </span>
+                        <span className="font-mono font-bold text-sm text-neutral-900">
+                          {item.lote}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-neutral-500 flex gap-2">
+                        {item.peso && <span>Teór: <strong>{item.peso} kg</strong></span>}
+                        {item.pesoReal && <span>Real: <strong>{item.pesoReal} kg</strong></span>}
+                      </div>
+                    </div>
+                    <span className="text-[10px] font-bold text-amber-600 bg-amber-50 border border-amber-200 px-2 py-1 rounded-full">
+                      Pendente
+                    </span>
+                  </div>
+                ))
               )}
+            </div>
+
+            <div className="pt-3 border-t border-neutral-200 mt-3 flex justify-end">
+              <Button onClick={() => setShowPendingModal(false)} className="w-full bg-neutral-900 hover:bg-neutral-800 text-white text-xs font-semibold py-2.5 rounded-xl">
+                Fechar
+              </Button>
             </div>
           </Card>
         </div>
@@ -664,6 +1109,17 @@ export function ScannerCaixas() {
         <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-sm">
           <Card className="w-full max-w-sm animate-in fade-in zoom-in duration-200">
             <div className="p-6">
+              {isOutOfExcelBase && excelBase.length > 0 && (
+                <div className="mb-3.5 p-2.5 bg-amber-50 border border-amber-300 rounded-xl flex items-start gap-2 text-amber-900 text-xs font-semibold animate-in fade-in">
+                  <AlertTriangle className="h-4 w-4 text-amber-600 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <span className="block font-bold text-amber-900">Lote Fora da Base Excel (Sobra)</span>
+                    <span className="font-normal text-[11px] text-amber-800 leading-tight block mt-0.5">
+                      O código {extract7Digits(currentBarcode)} não consta na planilha. Cadastre o Katame e Local normalmente:
+                    </span>
+                  </div>
+                </div>
+              )}
               <h3 className="text-xl font-bold text-neutral-900 mb-1">Código Lido!</h3>
               <p className="text-sm font-mono text-neutral-500 mb-6 bg-neutral-100 p-2 rounded border">{currentBarcode}</p>
               
@@ -779,6 +1235,98 @@ export function ScannerCaixas() {
           Modo Offline Ativo. Leituras serão sincronizadas quando houver internet.
         </div>
       )}
+
+      {/* EXCEL BASE BANNER & RECONCILIATION BAR */}
+      <div className="bg-white border-b border-neutral-200 px-4 py-2.5 z-10 relative">
+        <input 
+          type="file" 
+          accept=".xlsx, .xls, .csv" 
+          ref={excelFileInputRef} 
+          onChange={handleExcelBaseUpload} 
+          className="hidden" 
+        />
+        
+        {excelBase.length === 0 ? (
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2.5 text-neutral-600">
+              <div className="w-8 h-8 rounded-lg bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-600 flex-shrink-0">
+                <FileSpreadsheet className="h-4 w-4" />
+              </div>
+              <div className="text-xs">
+                <span className="font-bold text-neutral-800 block">Cruzar com Lista Excel</span>
+                <span className="text-[11px] text-neutral-400">Envie a planilha com as caixas da área</span>
+              </div>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => excelFileInputRef.current?.click()}
+              className="text-xs font-semibold border-emerald-500 text-emerald-700 hover:bg-emerald-50 flex items-center gap-1.5 h-8 flex-shrink-0 rounded-lg shadow-sm"
+            >
+              <Upload className="h-3.5 w-3.5" />
+              Carregar Excel
+            </Button>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                <span className="text-xs font-bold text-neutral-800 flex items-center gap-1">
+                  <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-600" />
+                  Base Excel ({excelBase.length} caixas)
+                </span>
+              </div>
+              <div className="flex items-center gap-1">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setShowPendingModal(true)}
+                  className="text-[11px] font-bold text-[#2941CC] hover:bg-[#2941CC]/10 h-7 px-2"
+                >
+                  Pendentes ({pendingExcelItems.length})
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => excelFileInputRef.current?.click()}
+                  title="Trocar planilha Excel"
+                  className="text-neutral-500 hover:text-neutral-800 h-7 w-7 p-0"
+                >
+                  <Upload className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    if (confirm("Deseja remover a planilha Excel carregada? O inventário voltará ao modo normal.")) {
+                      setExcelBase([]);
+                      localStorage.removeItem('katame_excel_base_caixas');
+                    }
+                  }}
+                  title="Remover base Excel"
+                  className="text-red-400 hover:text-red-600 h-7 w-7 p-0"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            </div>
+
+            {/* Progress indicator */}
+            <div className="flex items-center gap-2">
+              <div className="flex-1 bg-neutral-100 rounded-full h-2 overflow-hidden flex">
+                <div 
+                  className="bg-emerald-500 h-full transition-all duration-300" 
+                  style={{ width: `${excelBase.length > 0 ? (foundExcelCount / excelBase.length) * 100 : 0}%` }}
+                />
+              </div>
+              <span className="text-[11px] font-bold text-neutral-700 font-mono">
+                {foundExcelCount}/{excelBase.length} ({excelBase.length > 0 ? Math.round((foundExcelCount / excelBase.length) * 100) : 0}%)
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
 
       <div className="relative bg-black aspect-[3/4] w-full overflow-hidden flex items-center justify-center">
         {/* Reader element - always kept mounted in DOM */}
@@ -964,15 +1512,31 @@ export function ScannerCaixas() {
                   </Button>
                 </div>
                 <div className="mb-2">
-                  <div className="flex gap-2 mb-1">
-                    <span className="inline-block bg-[#2941CC]/10 text-[#2941CC] font-bold px-2 py-1 rounded text-sm">
+                  <div className="flex flex-wrap gap-1.5 mb-1.5 items-center">
+                    <span className="inline-block bg-[#2941CC]/10 text-[#2941CC] font-bold px-2 py-0.5 rounded text-xs">
                       {scan.composto || 'SEM KATAME'}
                     </span>
-                    <span className="inline-block bg-emerald-100 text-emerald-800 font-bold px-2 py-1 rounded text-sm">
+                    <span className="inline-block bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded text-xs">
                       {scan.unidade || 'SEM LOCAL'}
                     </span>
+                    {scan.statusConferencia === 'ENCONTRADO' && (
+                      <span className="inline-block bg-emerald-50 text-emerald-700 border border-emerald-200 font-bold px-1.5 py-0.5 rounded text-[10px]">
+                        ✓ EXCEL OK
+                      </span>
+                    )}
+                    {scan.statusConferencia === 'FORA_DA_LISTA' && (
+                      <span className="inline-block bg-amber-50 text-amber-700 border border-amber-200 font-bold px-1.5 py-0.5 rounded text-[10px]">
+                        ⚠️ FORA DA LISTA
+                      </span>
+                    )}
                   </div>
                   <p className="font-mono text-lg font-semibold text-neutral-900">{scan.lote || 'Sem Lote'}</p>
+                  {(scan.pesoTeorico || scan.pesoReal) && (
+                    <div className="flex gap-3 text-xs text-neutral-600 mt-1">
+                      {scan.pesoTeorico && <span>Teór: <strong>{scan.pesoTeorico} kg</strong></span>}
+                      {scan.pesoReal && <span>Real: <strong>{scan.pesoReal} kg</strong></span>}
+                    </div>
+                  )}
                 </div>
                 <p className="text-[10px] text-neutral-400 mt-3 pt-2 border-t border-neutral-100">
                   Capturado em: {scan.scannedAt?.toDate() ? scan.scannedAt.toDate().toLocaleTimeString('pt-BR') : '...'}
