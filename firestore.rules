@@ -11,5 +11,8 @@ service cloud.firestore {
     match /mantas_scans/{document} {
       allow read, write: if true;
     }
+    match /excel_inventory_base/{document} {
+      allow read, write: if true;
+    }
   }
 }

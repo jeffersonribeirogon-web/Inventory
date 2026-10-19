@@ -86,6 +86,19 @@
         }
       },
       "required": ["lote", "composto", "peso"]
+    },
+    "ExcelInventoryBase": {
+      "title": "ExcelInventoryBase",
+      "description": "Active uploaded Excel spreadsheet base containing boxes expected in the area for cross-referencing",
+      "type": "object",
+      "properties": {
+        "fileName": { "type": "string" },
+        "uploadedAt": { "type": "string", "format": "date-time" },
+        "uploadedBy": { "type": "string" },
+        "count": { "type": "number" },
+        "items": { "type": "array" }
+      },
+      "required": ["fileName", "uploadedAt", "count", "items"]
     }
   },
   "firestore": {
@@ -100,6 +113,10 @@
     "/mantas_scans/{mantaId}": {
       "schema": "MantaScan",
       "description": "Active collection of manta scans with weight"
+    },
+    "/excel_inventory_base/{baseId}": {
+      "schema": "ExcelInventoryBase",
+      "description": "Shared active Excel base synced between PC and mobile devices"
     }
   }
 }

@@ -3,22 +3,31 @@ import { useNavigate } from 'react-router-dom';
 import { 
   ArrowLeft, Trash2, Download, Mail, ScanLine, Camera, CameraOff, 
   Loader2, Upload, Save, BarChart2, AlertTriangle, FileSpreadsheet, 
-  CheckCircle2, X, Check 
+  CheckCircle2, X, Check, Smartphone, QrCode, Cloud, Copy, ExternalLink, RefreshCw 
 } from 'lucide-react';
-import { collection, addDoc, query, orderBy, onSnapshot, deleteDoc, doc, serverTimestamp, getDocs } from 'firebase/firestore';
+import { collection, addDoc, query, orderBy, onSnapshot, deleteDoc, doc, serverTimestamp, getDocs, setDoc, getDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { Button } from '../components/ui/button';
 import { Card } from '../components/ui/card';
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
 import { Html5Qrcode } from 'html5-qrcode';
+import QRCode from 'qrcode';
 import { saveInventoryReport } from '../lib/reports';
+import { downloadSampleExcelTemplate } from '../lib/excelBase';
 
 export interface ExcelCaixaItem {
   composto: string;
   lote: string; // 7 digits
   peso: string | number;
   pesoReal: string | number;
+}
+
+export interface ExcelBaseMeta {
+  fileName: string;
+  uploadedAt: string;
+  uploadedBy?: string;
+  itemsCount: number;
 }
 
 interface ScanItem {
@@ -79,6 +88,20 @@ export function ScannerCaixas() {
       return [];
     }
   });
+  const [excelBaseMeta, setExcelBaseMeta] = useState<ExcelBaseMeta | null>(() => {
+    try {
+      const saved = localStorage.getItem('katame_excel_base_caixas_meta');
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
+  const [isSyncingToCloud, setIsSyncingToCloud] = useState(false);
+  const [cloudNotification, setCloudNotification] = useState<string | null>(null);
+  const [showQrModal, setShowQrModal] = useState(false);
+  const [qrCodeDataUrl, setQrCodeDataUrl] = useState<string>('');
+  const [copiedLink, setCopiedLink] = useState(false);
+
   const [excelFoundModal, setExcelFoundModal] = useState<{
     barcode: string;
     lote7: string;
@@ -89,6 +112,54 @@ export function ScannerCaixas() {
   const [showPendingModal, setShowPendingModal] = useState(false);
   const [isOutOfExcelBase, setIsOutOfExcelBase] = useState(false);
   const excelFileInputRef = useRef<HTMLInputElement>(null);
+
+  // QR Code generator effect
+  useEffect(() => {
+    if (showQrModal) {
+      const targetUrl = window.location.href;
+      QRCode.toDataURL(targetUrl, {
+        width: 280,
+        margin: 2,
+        color: {
+          dark: '#0f172a',
+          light: '#ffffff'
+        }
+      })
+        .then((url) => setQrCodeDataUrl(url))
+        .catch((err) => console.error("Erro ao gerar QR Code:", err));
+    }
+  }, [showQrModal]);
+
+  // Sincronização em tempo real da Base Excel (PC ⇄ Celular via Firestore)
+  useEffect(() => {
+    const baseDocRef = doc(db, 'excel_inventory_base', 'current_active_base');
+    const unsubscribe = onSnapshot(baseDocRef, (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        const cloudItems = (data.items || []) as ExcelCaixaItem[];
+        if (cloudItems && cloudItems.length > 0) {
+          setExcelBase(cloudItems);
+          const meta: ExcelBaseMeta = {
+            fileName: data.fileName || 'base_katame.xlsx',
+            uploadedAt: data.uploadedAt || new Date().toISOString(),
+            uploadedBy: data.uploadedBy || 'PC / Nuvem',
+            itemsCount: cloudItems.length
+          };
+          setExcelBaseMeta(meta);
+          try {
+            localStorage.setItem('katame_excel_base_caixas', JSON.stringify(cloudItems));
+            localStorage.setItem('katame_excel_base_caixas_meta', JSON.stringify(meta));
+          } catch (e) {
+            console.warn("Storage warning:", e);
+          }
+        }
+      }
+    }, (err) => {
+      console.log("Firestore excelBase snapshot listener notice:", err);
+    });
+
+    return () => unsubscribe();
+  }, []);
 
   // Keep scansRef in sync with scans state
   useEffect(() => {
@@ -334,8 +405,41 @@ export function ScannerCaixas() {
         }
 
         setExcelBase(items);
-        localStorage.setItem('katame_excel_base_caixas', JSON.stringify(items));
-        alert(`✅ Base Excel importada com sucesso!\nTotal de caixas carregadas: ${items.length}`);
+        const isDesktop = typeof window !== 'undefined' && window.innerWidth > 768;
+        const meta: ExcelBaseMeta = {
+          fileName: file.name,
+          uploadedAt: new Date().toISOString(),
+          uploadedBy: isDesktop ? 'PC (Desktop)' : 'Celular (Mobile)',
+          itemsCount: items.length
+        };
+        setExcelBaseMeta(meta);
+
+        try {
+          localStorage.setItem('katame_excel_base_caixas', JSON.stringify(items));
+          localStorage.setItem('katame_excel_base_caixas_meta', JSON.stringify(meta));
+        } catch (storageErr) {
+          console.warn("Storage quota warning:", storageErr);
+        }
+
+        // Sincroniza imediatamente com a nuvem Firestore para o celular receber ao vivo!
+        setIsSyncingToCloud(true);
+        setDoc(doc(db, 'excel_inventory_base', 'current_active_base'), {
+          fileName: file.name,
+          uploadedAt: new Date().toISOString(),
+          uploadedBy: isDesktop ? 'PC (Desktop)' : 'Celular (Mobile)',
+          itemsCount: items.length,
+          items: items,
+          updatedAt: serverTimestamp()
+        }).then(() => {
+          setIsSyncingToCloud(false);
+          setCloudNotification(`✅ Base sincronizada na Nuvem! Pronta para uso no celular (${items.length} caixas).`);
+          setTimeout(() => setCloudNotification(null), 6000);
+        }).catch((err) => {
+          console.error("Erro ao sincronizar base com Firestore:", err);
+          setIsSyncingToCloud(false);
+        });
+
+        alert(`✅ Base Excel importada com sucesso!\nTotal de caixas: ${items.length}\nSincronizando com a nuvem para o celular...`);
       } catch (err) {
         console.error("Erro ao importar Excel:", err);
         alert("Erro ao ler o arquivo Excel. Verifique se o formato é válido (.xlsx, .xls ou .csv).");
@@ -348,11 +452,11 @@ export function ScannerCaixas() {
 
   // Sync modal state to ref for the scanner callback
   useEffect(() => {
-    isModalOpenRef.current = activeModal !== 'none' || duplicateModal !== null || excelFoundModal !== null || showPendingModal;
+    isModalOpenRef.current = activeModal !== 'none' || duplicateModal !== null || excelFoundModal !== null || showPendingModal || showQrModal;
     if (activeModal === 'none') {
       setDuplicateError(false);
     }
-  }, [activeModal, duplicateModal, excelFoundModal, showPendingModal]);
+  }, [activeModal, duplicateModal, excelFoundModal, showPendingModal, showQrModal]);
 
   const katames = ["REBK", "RETBK978", "RET", "RESW", "REL", "REP", "RETBSW", "RETB2", "RETB3", "RETB4", "RETBA", "RETK", "REK367"];
   const locais = ["UNIT1", "UNIT2", "UNIT3", "UNIT4", "UNIT5", "UNIT6", "TBR1", "TBR2", "MIX"];
@@ -1010,6 +1114,104 @@ export function ScannerCaixas() {
         </div>
       )}
 
+      {/* MODAL: ABRIR NO CELULAR (QR CODE & SINCRONIZAÇÃO EM NUVEM) */}
+      {showQrModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-sm animate-in fade-in duration-200">
+          <Card className="w-full max-w-md bg-white shadow-2xl rounded-2xl p-6 animate-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between pb-3 border-b border-neutral-200 mb-4">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-xl bg-blue-50 border border-blue-200 flex items-center justify-center text-[#2941CC]">
+                  <Smartphone className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-neutral-900 leading-tight">
+                    Usar no Celular com Câmera
+                  </h3>
+                  <p className="text-xs text-neutral-500">
+                    Sincronização em tempo real PC ⇄ Celular
+                  </p>
+                </div>
+              </div>
+              <Button variant="ghost" size="icon" onClick={() => setShowQrModal(false)} className="h-8 w-8 text-neutral-500 hover:text-neutral-800">
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+
+            <div className="space-y-4">
+              {/* QR Code Container */}
+              <div className="flex flex-col items-center justify-center p-4 bg-neutral-50 border border-neutral-200 rounded-2xl">
+                {qrCodeDataUrl ? (
+                  <img 
+                    src={qrCodeDataUrl} 
+                    alt="QR Code para Celular" 
+                    className="w-56 h-56 rounded-xl shadow-inner bg-white p-2 border border-neutral-200"
+                  />
+                ) : (
+                  <div className="w-56 h-56 flex items-center justify-center bg-white rounded-xl">
+                    <Loader2 className="h-8 w-8 animate-spin text-neutral-400" />
+                  </div>
+                )}
+                <span className="text-xs font-semibold text-neutral-600 mt-2 flex items-center gap-1.5">
+                  <QrCode className="h-3.5 w-3.5 text-blue-600" />
+                  Aponte a câmera do seu celular para este código
+                </span>
+              </div>
+
+              {/* Como funciona */}
+              <div className="bg-blue-50/70 border border-blue-200/80 rounded-xl p-3 text-xs text-blue-900 space-y-1.5">
+                <p className="font-bold flex items-center gap-1 text-blue-800">
+                  <Cloud className="h-3.5 w-3.5 text-blue-600" />
+                  Como funciona a conexão PC ⇄ Celular:
+                </p>
+                <ol className="list-decimal list-inside space-y-1 text-blue-700">
+                  <li><strong>Suba a planilha no PC:</strong> Ela é salva na nuvem segura em tempo real.</li>
+                  <li><strong>Abra no Celular:</strong> Pelo QR Code acima, o aplicativo abre no seu celular com a base já carregada!</li>
+                  <li><strong>Bipe as caixas na área:</strong> O celular cruza os 7 dígitos na hora e atualiza o PC ao vivo.</li>
+                </ol>
+              </div>
+
+              {/* Copy Link */}
+              <div className="flex items-center gap-2 p-2 bg-neutral-100 rounded-xl text-xs">
+                <span className="truncate flex-1 font-mono text-neutral-700 px-1">
+                  {typeof window !== 'undefined' ? window.location.href : ''}
+                </span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    if (navigator.clipboard) {
+                      navigator.clipboard.writeText(window.location.href);
+                      setCopiedLink(true);
+                      setTimeout(() => setCopiedLink(false), 2500);
+                    }
+                  }}
+                  className="h-8 text-xs font-semibold border-neutral-300 bg-white"
+                >
+                  {copiedLink ? (
+                    <span className="flex items-center gap-1 text-emerald-600 font-bold">
+                      <Check className="h-3.5 w-3.5" /> Copiado!
+                    </span>
+                  ) : (
+                    <span className="flex items-center gap-1">
+                      <Copy className="h-3.5 w-3.5" /> Copiar Link
+                    </span>
+                  )}
+                </Button>
+              </div>
+            </div>
+
+            <div className="mt-5 pt-3 border-t border-neutral-200 flex justify-end">
+              <Button
+                onClick={() => setShowQrModal(false)}
+                className="w-full bg-[#2941CC] hover:bg-[#2941CC]/90 text-white font-semibold py-2.5 rounded-xl shadow"
+              >
+                Entendido / Fechar
+              </Button>
+            </div>
+          </Card>
+        </div>
+      )}
+
       {/* Modals para apagar itens */}
       {itemToDelete && (
         <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 backdrop-blur-sm">
@@ -1214,6 +1416,15 @@ export function ScannerCaixas() {
           <Button 
             variant="ghost" 
             size="icon" 
+            onClick={() => setShowQrModal(true)} 
+            title="Abrir no Celular (QR Code)"
+            className="text-blue-600 hover:text-blue-700 hover:bg-blue-50"
+          >
+            <Smartphone className="h-5 w-5" />
+          </Button>
+          <Button 
+            variant="ghost" 
+            size="icon" 
             onClick={toggleCamera} 
             title={isCameraActive ? "Desligar câmera (Economia de energia)" : "Ligar câmera"}
             className={isCameraActive ? "text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50" : "text-amber-500 hover:text-amber-600 hover:bg-amber-50"}
@@ -1229,6 +1440,24 @@ export function ScannerCaixas() {
         </div>
       </header>
 
+      {/* CLOUD SYNC NOTIFICATION BANNER */}
+      {cloudNotification && (
+        <div className="bg-emerald-600 text-white px-4 py-2 text-xs font-semibold flex items-center justify-between shadow-md z-20 relative animate-in slide-in-from-top duration-200">
+          <div className="flex items-center gap-2">
+            <Cloud className="h-4 w-4" />
+            <span>{cloudNotification}</span>
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setCloudNotification(null)}
+            className="text-white hover:bg-emerald-700 h-6 w-6 p-0"
+          >
+            <X className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      )}
+
       {isOffline && (
         <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 flex items-center justify-center text-amber-800 text-xs font-medium z-10 relative shadow-sm">
           <span className="w-2 h-2 rounded-full bg-amber-500 mr-2 animate-pulse"></span>
@@ -1237,7 +1466,7 @@ export function ScannerCaixas() {
       )}
 
       {/* EXCEL BASE BANNER & RECONCILIATION BAR */}
-      <div className="bg-white border-b border-neutral-200 px-4 py-2.5 z-10 relative">
+      <div className="bg-white border-b border-neutral-200 px-4 py-2.5 z-10 relative shadow-xs">
         <input 
           type="file" 
           accept=".xlsx, .xls, .csv" 
@@ -1247,37 +1476,76 @@ export function ScannerCaixas() {
         />
         
         {excelBase.length === 0 ? (
-          <div className="flex items-center justify-between gap-2">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5">
             <div className="flex items-center gap-2.5 text-neutral-600">
               <div className="w-8 h-8 rounded-lg bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-600 flex-shrink-0">
                 <FileSpreadsheet className="h-4 w-4" />
               </div>
               <div className="text-xs">
                 <span className="font-bold text-neutral-800 block">Cruzar com Lista Excel</span>
-                <span className="text-[11px] text-neutral-400">Envie a planilha com as caixas da área</span>
+                <span className="text-[11px] text-neutral-500">
+                  Carregue no PC e bipe pelo celular na área (sincronização na nuvem)
+                </span>
               </div>
             </div>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => excelFileInputRef.current?.click()}
-              className="text-xs font-semibold border-emerald-500 text-emerald-700 hover:bg-emerald-50 flex items-center gap-1.5 h-8 flex-shrink-0 rounded-lg shadow-sm"
-            >
-              <Upload className="h-3.5 w-3.5" />
-              Carregar Excel
-            </Button>
+            <div className="flex items-center gap-1.5 w-full sm:w-auto justify-end flex-wrap">
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={downloadSampleExcelTemplate}
+                title="Baixar Planilha Modelo (.xlsx)"
+                className="text-xs text-neutral-600 hover:text-emerald-700 hover:bg-emerald-50 h-8 flex items-center gap-1.5 rounded-lg"
+              >
+                <Download className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">Modelo</span> .xlsx
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setShowQrModal(true)}
+                className="text-xs font-semibold border-blue-400 text-blue-700 hover:bg-blue-50 flex items-center gap-1.5 h-8 rounded-lg shadow-sm"
+              >
+                <Smartphone className="h-3.5 w-3.5" />
+                Abrir no Celular
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => excelFileInputRef.current?.click()}
+                className="text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white flex items-center gap-1.5 h-8 rounded-lg shadow-sm"
+              >
+                <Upload className="h-3.5 w-3.5" />
+                Carregar Excel
+              </Button>
+            </div>
           </div>
         ) : (
           <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-1.5">
+            <div className="flex flex-wrap items-center justify-between gap-1.5">
+              <div className="flex items-center gap-2">
                 <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
                 <span className="text-xs font-bold text-neutral-800 flex items-center gap-1">
                   <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-600" />
                   Base Excel ({excelBase.length} caixas)
                 </span>
+                <span className="inline-flex items-center gap-1 text-[10px] bg-blue-50 text-blue-700 border border-blue-200 px-1.5 py-0.5 rounded-full font-medium">
+                  <Cloud className="h-3 w-3 text-blue-600" />
+                  Nuvem PC ⇄ Celular
+                </span>
+                {isSyncingToCloud && (
+                  <Loader2 className="h-3 w-3 animate-spin text-blue-600" />
+                )}
               </div>
               <div className="flex items-center gap-1">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setShowQrModal(true)}
+                  className="text-[11px] font-bold text-blue-700 border-blue-300 hover:bg-blue-50 h-7 px-2 flex items-center gap-1 rounded-lg"
+                  title="Conectar celular pelo QR Code"
+                >
+                  <Smartphone className="h-3 w-3 text-blue-600" />
+                  No Celular
+                </Button>
                 <Button
                   size="sm"
                   variant="ghost"
@@ -1285,6 +1553,15 @@ export function ScannerCaixas() {
                   className="text-[11px] font-bold text-[#2941CC] hover:bg-[#2941CC]/10 h-7 px-2"
                 >
                   Pendentes ({pendingExcelItems.length})
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={downloadSampleExcelTemplate}
+                  title="Baixar Planilha Modelo (.xlsx)"
+                  className="text-neutral-500 hover:text-emerald-700 h-7 w-7 p-0"
+                >
+                  <Download className="h-3.5 w-3.5" />
                 </Button>
                 <Button
                   size="sm"
@@ -1298,10 +1575,17 @@ export function ScannerCaixas() {
                 <Button
                   size="sm"
                   variant="ghost"
-                  onClick={() => {
-                    if (confirm("Deseja remover a planilha Excel carregada? O inventário voltará ao modo normal.")) {
+                  onClick={async () => {
+                    if (confirm("Deseja remover a planilha Excel? Isso atualizará tanto o PC quanto o Celular conectado.")) {
                       setExcelBase([]);
-                      localStorage.removeItem('katame_excel_base_caixas');
+                      setExcelBaseMeta(null);
+                      try {
+                        localStorage.removeItem('katame_excel_base_caixas');
+                        localStorage.removeItem('katame_excel_base_caixas_meta');
+                        await deleteDoc(doc(db, 'excel_inventory_base', 'current_active_base'));
+                      } catch (e) {
+                        console.warn(e);
+                      }
                     }
                   }}
                   title="Remover base Excel"
@@ -1311,6 +1595,18 @@ export function ScannerCaixas() {
                 </Button>
               </div>
             </div>
+
+            {/* Meta info when available */}
+            {excelBaseMeta && (
+              <div className="flex items-center justify-between text-[10px] text-neutral-500 px-0.5">
+                <span className="truncate max-w-[220px]">
+                  Arquivo: <strong className="text-neutral-700">{excelBaseMeta.fileName}</strong> {excelBaseMeta.uploadedBy ? `(${excelBaseMeta.uploadedBy})` : ''}
+                </span>
+                <span>
+                  Sincronizado: {new Date(excelBaseMeta.uploadedAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                </span>
+              </div>
+            )}
 
             {/* Progress indicator */}
             <div className="flex items-center gap-2">
