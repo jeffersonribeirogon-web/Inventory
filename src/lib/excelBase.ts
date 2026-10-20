@@ -47,6 +47,18 @@ export function detectPlatform(): string {
 }
 
 /**
+/**
+ * Normaliza strings para comparação (remove acentos e espaços extras)
+ */
+function cleanStr(val: any): string {
+  return String(val ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toUpperCase();
+}
+
+/**
  * Lê e converte qualquer arquivo Excel (.xlsx, .xls ou .csv) em itens padronizados
  */
 export async function parseExcelFile(file: File): Promise<{ items: ExcelCaixaItem[]; meta: ExcelBaseMeta }> {
@@ -56,22 +68,38 @@ export async function parseExcelFile(file: File): Promise<{ items: ExcelCaixaIte
       try {
         const data = new Uint8Array(evt.target?.result as ArrayBuffer);
         const workbook = XLSX.read(data, { type: 'array' });
-        const firstSheetName = workbook.SheetNames[0];
-        if (!firstSheetName) {
+        
+        if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
           throw new Error("A planilha não possui abas válidas.");
         }
-        const worksheet = workbook.Sheets[firstSheetName];
 
-        const rawRows: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
+        // Procura a aba com maior quantidade de linhas úteis
+        let bestSheetName = workbook.SheetNames[0];
+        let bestRows: any[][] = [];
 
-        // Identifica linha de cabeçalho
+        for (const sheetName of workbook.SheetNames) {
+          const ws = workbook.Sheets[sheetName];
+          if (!ws) continue;
+          const rows: any[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+          if (rows.length > bestRows.length) {
+            bestRows = rows;
+            bestSheetName = sheetName;
+          }
+        }
+
+        const rawRows = bestRows;
+        if (rawRows.length === 0) {
+          throw new Error("A planilha selecionada está vazia.");
+        }
+
+        // Identifica linha de cabeçalho nos primeiros 30 registros
         let headerRowIndex = -1;
         let colComposto = -1;
         let colLote = -1;
         let colPeso = -1;
         let colPesoReal = -1;
 
-        for (let r = 0; r < Math.min(rawRows.length, 15); r++) {
+        for (let r = 0; r < Math.min(rawRows.length, 30); r++) {
           const row = rawRows[r];
           if (!row || !Array.isArray(row)) continue;
 
@@ -79,16 +107,18 @@ export async function parseExcelFile(file: File): Promise<{ items: ExcelCaixaIte
           let foundComp = -1;
 
           row.forEach((cell, idx) => {
-            const str = String(cell || '').trim().toUpperCase();
+            const str = cleanStr(cell);
             if (
-              str.includes('LOTE') || str === 'CODIGO' || str === 'LOT' || 
-              str.includes('BARCODE') || str.includes('ETIQUETA')
+              str.includes('LOTE') || str.includes('CODIGO') || str.includes('BARCODE') || 
+              str.includes('ETIQUETA') || str.includes('NUMERO') || str.includes('SERIE') ||
+              str === 'LOT' || str === 'ID' || str === 'TAG' || str === 'NS'
             ) {
               foundLote = idx;
             }
             if (
-              str.includes('COMPOSTO') || str.includes('KATAME') || str.includes('PROD') || 
-              str.includes('COMP') || str.includes('MATERIAL')
+              str.includes('COMPOSTO') || str.includes('KATAME') || str.includes('PRODUTO') || 
+              str.includes('MATERIAL') || str.includes('PROD') || str.includes('COMP') || 
+              str.includes('ITEM') || str.includes('DESCRICAO') || str.includes('DESC')
             ) {
               foundComp = idx;
             }
@@ -101,10 +131,10 @@ export async function parseExcelFile(file: File): Promise<{ items: ExcelCaixaIte
 
             // Busca colunas de peso
             row.forEach((cell, idx) => {
-              const str = String(cell || '').trim().toUpperCase();
-              if (str.includes('REAL')) {
+              const str = cleanStr(cell);
+              if (str.includes('REAL') || str.includes('BALANCA') || str.includes('PESADO')) {
                 colPesoReal = idx;
-              } else if (str.includes('PESO') || str.includes('TEORICO') || str.includes('KG')) {
+              } else if (str.includes('PESO') || str.includes('TEORICO') || str.includes('KG') || str.includes('LIQUIDO')) {
                 colPeso = idx;
               }
             });
@@ -112,8 +142,27 @@ export async function parseExcelFile(file: File): Promise<{ items: ExcelCaixaIte
           }
         }
 
-        // Se não localizou por texto explícito, usa a ordem padrão informada:
-        // Coluna 0: Composto | Coluna 1: Lote | Coluna 2: Peso | Coluna 3: Peso Real
+        // Se encontrou apenas Lote mas não Composto (ou vice-versa)
+        if (headerRowIndex === -1) {
+          for (let r = 0; r < Math.min(rawRows.length, 30); r++) {
+            const row = rawRows[r];
+            if (!row || !Array.isArray(row)) continue;
+            row.forEach((cell, idx) => {
+              const str = cleanStr(cell);
+              if (str.includes('LOTE') || str.includes('CODIGO') || str.includes('BARCODE')) {
+                headerRowIndex = r;
+                colLote = idx;
+              }
+            });
+            if (headerRowIndex !== -1) {
+              // Composto assume a coluna 0 ou 1 adjacente
+              colComposto = colLote === 0 ? 1 : 0;
+              break;
+            }
+          }
+        }
+
+        // Fallback inteligente: se não encontrou cabeçalho nomeado, busca coluna com números
         if (headerRowIndex === -1 && rawRows.length > 0) {
           headerRowIndex = 0;
           colComposto = 0;
@@ -131,9 +180,10 @@ export async function parseExcelFile(file: File): Promise<{ items: ExcelCaixaIte
           if (!rawLote) continue;
 
           const cleanLote = rawLote.replace(/\.0+$/, '').trim();
-          if (!cleanLote || cleanLote.toUpperCase().includes('LOTE')) continue;
+          const cleanUpper = cleanLote.toUpperCase();
+          if (!cleanLote || cleanUpper.includes('LOTE') || cleanUpper.includes('CODIGO')) continue;
 
-          // Normaliza lote para os 7 dígitos
+          // Normaliza lote para 7 dígitos (ex: 1013061 ou com zero 0929006)
           const lote7 = cleanLote.length >= 7 ? cleanLote.slice(-7) : cleanLote.padStart(7, '0');
           const composto = String(row[colComposto] ?? '').trim().toUpperCase() || 'REBK';
           const peso = colPeso !== -1 ? String(row[colPeso] ?? '').trim() : '';
@@ -148,7 +198,7 @@ export async function parseExcelFile(file: File): Promise<{ items: ExcelCaixaIte
         }
 
         if (items.length === 0) {
-          throw new Error("Nenhuma linha com lote válido foi encontrada na planilha.");
+          throw new Error("Nenhuma linha com lote válido foi encontrada na planilha. Verifique as colunas de LOTE e COMPOSTO.");
         }
 
         const meta: ExcelBaseMeta = {
@@ -165,6 +215,29 @@ export async function parseExcelFile(file: File): Promise<{ items: ExcelCaixaIte
     };
     reader.onerror = () => reject(new Error("Falha ao ler o arquivo selecionado."));
     reader.readAsArrayBuffer(file);
+  });
+}
+
+/**
+ * Cruza um código de barras escaneado (com 12 ou 7 dígitos) com os itens da base Excel
+ */
+export function matchBarcodeWithExcel(cleanBarcode: string, excelBase: ExcelCaixaItem[]): ExcelCaixaItem | undefined {
+  if (!cleanBarcode || !excelBase || excelBase.length === 0) return undefined;
+
+  const lote7 = extract7Digits(cleanBarcode);
+  const lote7SemZeros = lote7.replace(/^0+/, '');
+  const barcodeTrim = cleanBarcode.trim();
+
+  return excelBase.find((item) => {
+    const itemLote = String(item.lote || '').trim();
+    const itemLoteSemZeros = itemLote.replace(/^0+/, '');
+
+    return (
+      itemLote === lote7 ||
+      (itemLoteSemZeros && itemLoteSemZeros === lote7SemZeros) ||
+      barcodeTrim.endsWith(itemLote) ||
+      itemLote === barcodeTrim
+    );
   });
 }
 
@@ -208,16 +281,25 @@ export function clearExcelBaseLocally() {
 }
 
 /**
- * Salva a base no Firestore para sincronização automática entre todas as plataformas (PC, Celular, Tablet)
+ * Salva a base no Firestore para sincronização automática entre todas as plataformas (PC, Celular, Tablet na Rede)
  */
 export async function saveExcelBaseToCloud(items: ExcelCaixaItem[], meta: ExcelBaseMeta): Promise<void> {
   const baseDocRef = doc(db, 'excel_inventory_base', 'current_active_base');
+  
+  // Compacta os itens para economia de banda e respeitar o limite de 1MB do Firestore
+  const compactItems = items.map(it => ({
+    lote: it.lote,
+    composto: it.composto,
+    peso: it.peso || '',
+    pesoReal: it.pesoReal || ''
+  }));
+
   await setDoc(baseDocRef, {
     fileName: meta.fileName,
     uploadedAt: meta.uploadedAt,
     uploadedBy: meta.uploadedBy || detectPlatform(),
     itemsCount: items.length,
-    items: items,
+    items: compactItems,
     updatedAt: serverTimestamp()
   });
 }
@@ -242,17 +324,25 @@ export function listenToCloudExcelBase(
     (snap) => {
       if (snap.exists()) {
         const data = snap.data();
-        const items = (data.items || []) as ExcelCaixaItem[];
+        const rawItems = (data.items || []) as any[];
+        const items: ExcelCaixaItem[] = rawItems.map(it => ({
+          lote: String(it.lote || it.l || '').trim(),
+          composto: String(it.composto || it.c || '').trim(),
+          peso: it.peso ?? it.p ?? '',
+          pesoReal: it.pesoReal ?? it.pr ?? ''
+        }));
+
         const meta: ExcelBaseMeta = {
           fileName: data.fileName || 'base_katame.xlsx',
           uploadedAt: data.uploadedAt || new Date().toISOString(),
           uploadedBy: data.uploadedBy || 'Nuvem',
           itemsCount: items.length
         };
-        // Mantém cache local atualizado automaticamente
+        // Mantém cache local atualizado automaticamente para uso offline
         saveExcelBaseLocally(items, meta);
         callback({ items, meta });
       } else {
+        clearExcelBaseLocally();
         callback(null);
       }
     },

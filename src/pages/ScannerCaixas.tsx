@@ -14,21 +14,13 @@ import * as XLSX from 'xlsx';
 import { Html5Qrcode } from 'html5-qrcode';
 import QRCode from 'qrcode';
 import { saveInventoryReport } from '../lib/reports';
-import { downloadSampleExcelTemplate } from '../lib/excelBase';
+import { 
+  ExcelCaixaItem, ExcelBaseMeta, downloadSampleExcelTemplate,
+  parseExcelFile, saveExcelBaseLocally, saveExcelBaseToCloud,
+  clearExcelBaseLocally, clearExcelBaseFromCloud, matchBarcodeWithExcel,
+  listenToCloudExcelBase
+} from '../lib/excelBase';
 
-export interface ExcelCaixaItem {
-  composto: string;
-  lote: string; // 7 digits
-  peso: string | number;
-  pesoReal: string | number;
-}
-
-export interface ExcelBaseMeta {
-  fileName: string;
-  uploadedAt: string;
-  uploadedBy?: string;
-  itemsCount: number;
-}
 
 interface ScanItem {
   id: string;
@@ -132,30 +124,14 @@ export function ScannerCaixas() {
 
   // Sincronização em tempo real da Base Excel (PC ⇄ Celular via Firestore)
   useEffect(() => {
-    const baseDocRef = doc(db, 'excel_inventory_base', 'current_active_base');
-    const unsubscribe = onSnapshot(baseDocRef, (snap) => {
-      if (snap.exists()) {
-        const data = snap.data();
-        const cloudItems = (data.items || []) as ExcelCaixaItem[];
-        if (cloudItems && cloudItems.length > 0) {
-          setExcelBase(cloudItems);
-          const meta: ExcelBaseMeta = {
-            fileName: data.fileName || 'base_katame.xlsx',
-            uploadedAt: data.uploadedAt || new Date().toISOString(),
-            uploadedBy: data.uploadedBy || 'PC / Nuvem',
-            itemsCount: cloudItems.length
-          };
-          setExcelBaseMeta(meta);
-          try {
-            localStorage.setItem('katame_excel_base_caixas', JSON.stringify(cloudItems));
-            localStorage.setItem('katame_excel_base_caixas_meta', JSON.stringify(meta));
-          } catch (e) {
-            console.warn("Storage warning:", e);
-          }
-        }
+    const unsubscribe = listenToCloudExcelBase((data) => {
+      if (data && data.items.length > 0) {
+        setExcelBase(data.items);
+        setExcelBaseMeta(data.meta);
+      } else {
+        setExcelBase([]);
+        setExcelBaseMeta(null);
       }
-    }, (err) => {
-      console.log("Firestore excelBase snapshot listener notice:", err);
     });
 
     return () => unsubscribe();
@@ -251,8 +227,7 @@ export function ScannerCaixas() {
 
     // Se houver uma base Excel carregada, faz o cruzamento pelos últimos 7 dígitos!
     if (excelBase.length > 0) {
-      const lote7 = extract7Digits(cleanBarcode);
-      const matched = excelBase.find(item => item.lote === lote7);
+      const matched = matchBarcodeWithExcel(cleanBarcode, excelBase);
 
       if (matched) {
         // CENÁRIO A: ENCONTRADO NO EXCEL!
@@ -284,7 +259,6 @@ export function ScannerCaixas() {
         return;
       } else {
         // CENÁRIO B: NÃO CONSTA NO EXCEL!
-        // "Quando eu ler um lote que não consta na base do excel deve abrir todo o fluxo de registro igual ja temos"
         playBeep();
         setIsReading(false);
         setIsOutOfExcelBase(true);
@@ -301,153 +275,29 @@ export function ScannerCaixas() {
   };
 
   // Parser inteligente de arquivos Excel (.xlsx / .csv)
-  const handleExcelBaseUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleExcelBaseUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = (evt) => {
-      try {
-        const data = new Uint8Array(evt.target?.result as ArrayBuffer);
-        const workbook = XLSX.read(data, { type: 'array' });
-        const firstSheetName = workbook.SheetNames[0];
-        const worksheet = workbook.Sheets[firstSheetName];
-        
-        // Linhas brutas como matriz 2D
-        const rawRows: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
+    setIsSyncingToCloud(true);
+    try {
+      const { items, meta } = await parseExcelFile(file);
+      setExcelBase(items);
+      setExcelBaseMeta(meta);
+      saveExcelBaseLocally(items, meta);
 
-        // Localiza a linha de cabeçalho que contenha COMPOSTO e LOTE
-        let headerRowIndex = -1;
-        let colComposto = -1;
-        let colLote = -1;
-        let colPeso = -1;
-        let colPesoReal = -1;
-
-        for (let r = 0; r < Math.min(rawRows.length, 12); r++) {
-          const row = rawRows[r];
-          if (!row || !Array.isArray(row)) continue;
-
-          let foundLote = -1;
-          let foundComp = -1;
-
-          row.forEach((cell, idx) => {
-            const str = String(cell || '').trim().toUpperCase();
-            if (
-              str.includes('LOTE') || str === 'CODIGO' || str === 'LOT' || 
-              str.includes('BARCODE') || str.includes('ETIQUETA')
-            ) {
-              foundLote = idx;
-            }
-            if (
-              str.includes('COMPOSTO') || str.includes('KATAME') || str.includes('PROD') || 
-              str.includes('COMP') || str.includes('MATERIAL')
-            ) {
-              foundComp = idx;
-            }
-          });
-
-          if (foundLote !== -1 && foundComp !== -1) {
-            headerRowIndex = r;
-            colLote = foundLote;
-            colComposto = foundComp;
-
-            // Identifica colunas de PESO e PESO REAL
-            row.forEach((cell, idx) => {
-              const str = String(cell || '').trim().toUpperCase();
-              if (str.includes('REAL')) {
-                colPesoReal = idx;
-              } else if (str.includes('PESO') || str.includes('TEORICO') || str.includes('KG')) {
-                colPeso = idx;
-              }
-            });
-            break;
-          }
-        }
-
-        // Se não localizou cabeçalho com texto explícito, tenta detecção por ordem padrão:
-        // Coluna 0: Composto | Coluna 1: Lote | Coluna 2: Peso | Coluna 3: Peso Real
-        if (headerRowIndex === -1 && rawRows.length > 0) {
-          headerRowIndex = 0;
-          colComposto = 0;
-          colLote = 1;
-          colPeso = 2;
-          colPesoReal = 3;
-        }
-
-        const items: ExcelCaixaItem[] = [];
-        for (let r = headerRowIndex + 1; r < rawRows.length; r++) {
-          const row = rawRows[r];
-          if (!row || !Array.isArray(row)) continue;
-
-          const rawLote = String(row[colLote] ?? '').trim();
-          if (!rawLote) continue;
-
-          const cleanLote = rawLote.replace(/\.0+$/, '').trim();
-          if (!cleanLote || cleanLote.toUpperCase().includes('LOTE')) continue;
-
-          // Normaliza lote para 7 dígitos (ex: 1013061 ou com zero 0929006)
-          const lote7 = cleanLote.length >= 7 ? cleanLote.slice(-7) : cleanLote.padStart(7, '0');
-          const composto = String(row[colComposto] ?? '').trim().toUpperCase() || 'REBK';
-          const peso = colPeso !== -1 ? String(row[colPeso] ?? '').trim() : '';
-          const pesoReal = colPesoReal !== -1 ? String(row[colPesoReal] ?? '').trim() : '';
-
-          items.push({
-            lote: lote7,
-            composto,
-            peso,
-            pesoReal
-          });
-        }
-
-        if (items.length === 0) {
-          alert("Nenhuma linha com lote válido foi encontrada na planilha. Verifique as colunas 'COMPOSTO' e 'LOTE'.");
-          return;
-        }
-
-        setExcelBase(items);
-        const isDesktop = typeof window !== 'undefined' && window.innerWidth > 768;
-        const meta: ExcelBaseMeta = {
-          fileName: file.name,
-          uploadedAt: new Date().toISOString(),
-          uploadedBy: isDesktop ? 'PC (Desktop)' : 'Celular (Mobile)',
-          itemsCount: items.length
-        };
-        setExcelBaseMeta(meta);
-
-        try {
-          localStorage.setItem('katame_excel_base_caixas', JSON.stringify(items));
-          localStorage.setItem('katame_excel_base_caixas_meta', JSON.stringify(meta));
-        } catch (storageErr) {
-          console.warn("Storage quota warning:", storageErr);
-        }
-
-        // Sincroniza imediatamente com a nuvem Firestore para o celular receber ao vivo!
-        setIsSyncingToCloud(true);
-        setDoc(doc(db, 'excel_inventory_base', 'current_active_base'), {
-          fileName: file.name,
-          uploadedAt: new Date().toISOString(),
-          uploadedBy: isDesktop ? 'PC (Desktop)' : 'Celular (Mobile)',
-          itemsCount: items.length,
-          items: items,
-          updatedAt: serverTimestamp()
-        }).then(() => {
-          setIsSyncingToCloud(false);
-          setCloudNotification(`✅ Base sincronizada na Nuvem! Pronta para uso no celular (${items.length} caixas).`);
-          setTimeout(() => setCloudNotification(null), 6000);
-        }).catch((err) => {
-          console.error("Erro ao sincronizar base com Firestore:", err);
-          setIsSyncingToCloud(false);
-        });
-
-        alert(`✅ Base Excel importada com sucesso!\nTotal de caixas: ${items.length}\nSincronizando com a nuvem para o celular...`);
-      } catch (err) {
-        console.error("Erro ao importar Excel:", err);
-        alert("Erro ao ler o arquivo Excel. Verifique se o formato é válido (.xlsx, .xls ou .csv).");
-      } finally {
-        if (excelFileInputRef.current) excelFileInputRef.current.value = '';
-      }
-    };
-    reader.readAsArrayBuffer(file);
+      await saveExcelBaseToCloud(items, meta);
+      setIsSyncingToCloud(false);
+      setCloudNotification(`✅ Base sincronizada na Nuvem! Pronta para uso no celular (${items.length} caixas).`);
+      setTimeout(() => setCloudNotification(null), 6000);
+      alert(`✅ Base Excel importada com sucesso!\nTotal de caixas: ${items.length}\nDisponível em tempo real no PC, Celular e Tablet.`);
+    } catch (err: any) {
+      console.error("Erro ao importar Excel:", err);
+      setIsSyncingToCloud(false);
+      alert(`Erro ao ler arquivo: ${err.message || 'Verifique se o arquivo está no formato .xlsx, .xls ou .csv.'}`);
+    } finally {
+      if (excelFileInputRef.current) excelFileInputRef.current.value = '';
+    }
   };
 
   // Sync modal state to ref for the scanner callback
@@ -1579,10 +1429,9 @@ export function ScannerCaixas() {
                     if (confirm("Deseja remover a planilha Excel? Isso atualizará tanto o PC quanto o Celular conectado.")) {
                       setExcelBase([]);
                       setExcelBaseMeta(null);
+                      clearExcelBaseLocally();
                       try {
-                        localStorage.removeItem('katame_excel_base_caixas');
-                        localStorage.removeItem('katame_excel_base_caixas_meta');
-                        await deleteDoc(doc(db, 'excel_inventory_base', 'current_active_base'));
+                        await clearExcelBaseFromCloud();
                       } catch (e) {
                         console.warn(e);
                       }
